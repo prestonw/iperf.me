@@ -24,6 +24,19 @@
 <script>
 let WORKER = 'https://edge.iperf.me';
 
+
+<script src="https://unpkg.com/xterm@5.3.0/lib/xterm.js"></script>
+<script src="https://unpkg.com/xterm-addon-fit@0.10.0/lib/xterm-addon-fit.js"></script>
+<script>
+  const term = new Terminal({ theme:{ background:'#0b0e12' }, scrollback: 500 });
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(document.getElementById('terminal'));
+  fitAddon.fit();                         // set cols/rows to container
+
+  // keep it fitted when rotating/resizing
+  window.addEventListener('resize', () => fitAddon.fit());
+
 // Allow override via URL param (?worker=https://...)
 try {
   const u = new URL(window.location.href);
@@ -35,7 +48,15 @@ try {
 const term = new Terminal({theme:{background:'#0b0e12'}});
 term.open(document.getElementById('terminal'));
 
-function line(s){ term.writeln(s); }
+function writelnWrapped(s) {
+    const max = Math.max(1, term.cols - 1);
+    for (let i = 0; i < s.length; i += max) {
+      term.writeln(s.slice(i, i + max));
+    }
+  }
+
+  function line(s){ writelnWrapped(s); }
+
 function pad(n, width){ n = String(n); return n.length>=width ? n : ' '.repeat(width-n.length)+n; }
 
 async function runOnce(dir, sizeMB=10){
