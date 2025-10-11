@@ -43,7 +43,9 @@ async function runOnce(dir, sizeMB=10){
   const start = performance.now();
   if(dir === 'upload'){
     const payload = new Uint8Array(bytes);
-    crypto.getRandomValues(payload);
+    for (let i = 0; i < payload.length; i += 65536) {
+      crypto.getRandomValues(payload.subarray(i, Math.min(i + 65536, payload.length)));
+    }
     await fetch(WORKER + '/upload', { method:'POST', body: payload });
   } else {
     const r = await fetch(WORKER + '/download?bytes=' + bytes);
@@ -67,7 +69,7 @@ async function runOnce(dir, sizeMB=10){
     line('> Starting 10 MB download test...');
     await runOnce('download', 10);
     line('> Done.');
-    line('This MVP is open-source and iPerf-inspired. Edit size via code; pro mode can add streams & WT/QUIC later.');
+    line('iPerf.me is open-source and iPerf-inspired. Edit size via code; pro mode can add streams & WT/QUIC later.');
   } catch (e) {
     line('Error: ' + (e && e.message ? e.message : e));
   }
