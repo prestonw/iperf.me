@@ -191,39 +191,49 @@
   wrap(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(upMiB,7)}        ${pad(upMb.toFixed(1),7)}       snd  (P=1)`);
   wrap(`        ➤ ISP view: ${upMb.toFixed(1)} Mbps${upMb>=1000?`  (${upGb.toFixed(2)} Gbps)`:''}`);
 
-  /* ======================== DOWNLOAD PHASE (timed streams) ====================== */
-  wrap('');
-  wrap(`$ iperf3 -c edge-auto -t ${T} -P ${P}   # download phase`);
-  wrap('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+/* ======================== DOWNLOAD PHASE (timed streams) ====================== */
+wrap('');
+wrap(`$ iperf3 -c edge-auto -t ${T} -P ${P}   # download phase`);
+wrap('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
 
-  let dnBytes = 0;
-  const dnStart = performance.now();
-  const dnUntil = dnStart + T*1000;
+let dnBytes = 0;
+const dnStart = performance.now();
+const dnUntil = dnStart + T*1000;
 
-  const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
+const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
 
-  async function dnTask(){
-    while (performance.now() < dnUntil) {
-      const remain = Math.max(1, Math.ceil((dnUntil - performance.now())/1000));
-      const r = await fetch(`${WORKER}/d?t=${remain}&slabMiB=${slabMiB}&nonce=${nonce()}`, { cache:'no-store' });
-      const reader = r.body.getReader();
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        dnBytes += value.byteLength;
-        if (performance.now() >= dnUntil) break;
-      }
+async function dnTask(id){
+  try {
+    // Open ONE long-lived stream for the entire duration
+    const r = await fetch(`${WORKER}/d?t=${T}&slabMiB=${slabMiB}&nonce=${nonce()}`, { cache:'no-store' });
+    const reader = r.body.getReader();
+    let myBytes = 0;
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      myBytes += value.byteLength;
+      dnBytes += value.byteLength;
+
+      // Safety: stop counting if we’re past deadline (stream should close itself)
       if (performance.now() >= dnUntil) break;
     }
-  }
-  await Promise.allSettled(Array.from({length:P}, () => dnTask()));
-  await dnTicker;
 
-  const dnMiB = toMiB(dnBytes).toFixed(2);
-  const dnMb  = toMb(dnBytes, T);
-  const dnGb  = toGb(dnMb);
-  wrap(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(dnMiB,7)}        ${pad(dnMb.toFixed(1),7)}       rcv  (P=${P})`);
-  wrap(`        ➤ ISP view: ${dnMb.toFixed(1)} Mbps${dnMb>=1000?`  (${dnGb.toFixed(2)} Gbps)`:''}`);
+    wrap(`[DBG] download stream #${id}: ${(myBytes/(1024*1024)).toFixed(2)} MiB`);
+  } catch (e) {
+    wrap(`[DBG] download stream #${id} error: ${String(e)}`);
+  }
+}
+
+await Promise.allSettled(Array.from({length:P}, (_,i) => dnTask(i+1)));
+await dnTicker;
+
+const dnMiB = toMiB(dnBytes).toFixed(2);
+const dnMb  = toMb(dnBytes, T);
+const dnGb  = dnMb/1000;
+wrap(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(dnMiB,7)}        ${pad(dnMb.toFixed(1),7)}       rcv  (P=${P})`);
+wrap(`        ➤ ISP view: ${dnMb.toFixed(1)} Mbps${dnMb>=1000?`  (${dnGb.toFixed(2)} Gbps)`:''}`);
+
 
   /* =========================== SUMMARY ============================ */
   wrap('+-------------------- iperf.me summary --------------------+');
