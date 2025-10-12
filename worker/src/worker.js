@@ -32,23 +32,28 @@ export default {
       });
     }
 
-    // -------- Timed streaming DOWNLOAD (server sends data): GET /d?t=SECONDS&slabMiB=32 --------
+    // -------- Timed high-throughput DOWNLOAD: GET /d?t=SECONDS&slabMiB=32 --------
     if (url.pathname === '/d' && req.method === 'GET') {
-      const tSec = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
-      const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
+      const tSec   = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
+      const slabMiB= Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
       const deadline = Date.now() + tSec * 1000;
 
-      // Prebuild one slab with a simple 0/1 pattern (defeats compression/caching)
+      // Prebuild one slab with a simple 0/1 flip pattern (avoids compression/caching)
       const slab = new Uint8Array(slabMiB * 1024 * 1024);
       for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
 
+      // Continuous enqueue loop tuned for throughput.
+      // We don't wait on backpressure; we schedule the next tick ASAP.
       const stream = new ReadableStream({
-        pull(controller) {
-          // Enqueue repeatedly while downstream has demand and time remains
-          while ((controller.desiredSize ?? 0) > 0) {
+        start(controller) {
+          const tick = () => {
             if (Date.now() >= deadline) { controller.close(); return; }
             controller.enqueue(slab);
-          }
+            // Schedule next enqueue as soon as possible without blocking the event loop.
+            // setTimeout(..., 0) plays nicer with the runtime than a tight while(true).
+            setTimeout(tick, 0);
+          };
+          tick();
         }
       });
 
@@ -94,6 +99,7 @@ export default {
       const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
       const slab = new Uint8Array(slabMiB * 1024 * 1024);
       for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
+
       const stream = new ReadableStream({
         start(controller) {
           let sent = 0;
