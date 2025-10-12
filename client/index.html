@@ -4,196 +4,194 @@
 <title>iperf.me — MVP</title>
 <link rel="stylesheet" href="vendor/xterm/xterm.min.css">
 <style>
-  :root { --bg:#0b0e12; --fg:#e6edf3; --dim:#a5b4c4; --line:#1d2633; }
+  :root { --bg:#0b0e12; --fg:#e6edf3; --dim:#a5b4c4; --line:#1d2633; --pill:#142033; --link:#69b8ff; }
   html,body { height:100% }
   body {
     margin:0; background:var(--bg); color:var(--fg);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+    font-size:12px; line-height:1.15;
+    -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
   }
   header {
     padding:8px 12px; border-bottom:1px solid var(--line);
-    display:flex; gap:10px; align-items:center
+    display:flex; align-items:center; gap:8px;
   }
-  header strong { letter-spacing:.5px }
-  .badge {
-    background:#142033; padding:3px 7px; border-radius:6px;
-    font-size:11px; color:var(--dim); white-space:nowrap
-  }
-  #terminal { height: calc(100vh - 46px) }
-  a { color:#69b8ff; text-decoration:none } a:hover{text-decoration:underline}
+  .badge { background:var(--pill); color:var(--dim); padding:3px 6px; border-radius:6px; font-size:11px; white-space:nowrap; }
   .sep { opacity:.5 }
+  #terminal { height:calc(100vh - 46px) }
+  a { color:var(--link); text-decoration:none } a:hover{ text-decoration:underline }
 </style>
 
 <header>
   <strong>iperf.me</strong>
   <span class="sep">|</span>
   <span class="badge">edge-friendly, iPerf-style</span>
-  <span style="margin-left:auto;font-size:11px;color:#9db0c0">Inspired by iPerf3 (BSD, ESnet). Not affiliated.</span>
+  <span style="margin-left:auto;font-size:11px;color:#8fa5b7">Inspired by iPerf3 (BSD, ESnet). Not affiliated.</span>
 </header>
 <div id="terminal"></div>
 
-<!-- Local assets (no CDN) -->
 <script defer src="vendor/xterm/xterm.min.js"></script>
 <script defer src="vendor/xterm/xterm-addon-fit.js"></script>
 
 <script>
-  /* -------------------- config & params -------------------- */
-  let WORKER = 'https://edge.iperf.me';
-  const DEF = { dur: 10, par: 4, chunkMiB: 16 };
-  const LIMITS = { upChunkMiBMax: 8, dnChunkMiBMax: 64 };
-  
-  try {
-    const u = new URL(location.href);
-    WORKER = u.searchParams.get('worker') || WORKER;
-  } catch {}
-  
-  const q = new URLSearchParams(location.search);
-  const DURATION = Math.max(1, Math.min(parseInt(q.get('t') || DEF.dur, 10), 60));
-  const PARALLEL = Math.max(1, Math.min(parseInt(q.get('p') || DEF.par, 10), 8));
-  const START_CHUNK_MIB = Math.max(1, Math.min(parseInt(q.get('chunk') || DEF.chunkMiB, 10), LIMITS.dnChunkMiBMax));
-  
-  /* -------------------- terminal -------------------- */
-  function boot() {
-    if (!(window.Terminal && window.FitAddon)) {
-      document.getElementById('terminal').textContent = 'Failed to load terminal assets.';
-      return;
-    }
-  
-    const term = new Terminal({
-      theme:{ background:'#0b0e12' },
-      fontSize: 12,
-      lineHeight: 1.1,
-      scrollback: 500
-    });
-    const fitAddon = new FitAddon.FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(document.getElementById('terminal'));
-    fitAddon.fit();
-    addEventListener('resize', () => fitAddon.fit());
-  
-    const writelnWrapped = (s) => {
-      const max = Math.max(1, term.cols - 1);
-      for (let i = 0; i < s.length; i += max) term.writeln(s.slice(i, i + max));
-    };
-    const line = (s='') => writelnWrapped(s);
-    const pad = (n,w)=>{ n=String(n); return n.length>=w?n:' '.repeat(w-n.length)+n };
-    const bar = (ratio, width=40) => {
-      const n = Math.max(0, Math.min(width, Math.round(ratio*width)));
-      return '█'.repeat(n) + '·'.repeat(width-n);
-    };
-    const nonce = () => Math.random().toString(36).slice(2);
-  
-    // ---- primitives ----
-    const upBuf   = new Uint8Array(LIMITS.upChunkMiBMax * 1024 * 1024);
-    const upBlob  = new Blob([upBuf], { type: 'application/octet-stream' });
-  
-    async function fetchUpload(bytes, signal) {
-      const want = Math.min(bytes, upBuf.byteLength);
-      const body = upBlob.slice(0, want, 'application/octet-stream');
-      const t0 = performance.now();
-      try {
+/* -------------------- config & params -------------------- */
+let WORKER = 'https://edge.iperf.me';
+try {
+  const u = new URL(location.href);
+  WORKER = u.searchParams.get('worker') || WORKER;
+} catch { /* noop */ }
+
+const q = new URLSearchParams(location.search);
+const DURATION = Math.max(1, Math.min(parseInt(q.get('t') || '10', 10), 60));
+const PARALLEL = Math.max(1, Math.min(parseInt(q.get('p') || '4', 10), 8));
+const START_CHUNK_MIB = Math.max(1, Math.min(parseInt(q.get('chunk') || '16', 10), 64));
+
+const LIMITS = { upChunkMiBMax: 8, dnChunkMiBMax: 64 };
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+/* -------------------- terminal boot -------------------- */
+function boot() {
+  if (!(window.Terminal && window.FitAddon)) {
+    document.getElementById('terminal').textContent = 'Failed to load terminal assets.';
+    return;
+  }
+
+  const term = new Terminal({
+    theme:{ background:'#0b0e12' },
+    fontSize:12, lineHeight:1.15, scrollback:600, convertEol:true
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('terminal'));
+  fit.fit();
+  addEventListener('resize', () => fit.fit());
+
+  const wrap = (s) => {
+    const max = Math.max(1, term.cols - 1);
+    for (let i = 0; i < s.length; i += max) term.writeln(s.slice(i, i + max));
+  };
+  const pad = (v,w)=> String(v).padStart(w,' ');
+  const toMiB = (b)=> b/(1024*1024);                 // MiB (2^20)
+  const toMb  = (b,s)=> (b*8/1e6)/Math.max(s,1e-6);  // Mbit/s (10^6)
+  const nonce = ()=> Math.random().toString(36).slice(2);
+
+  // ---- prealloc single upload slab and Blob (reliable across browsers) ----
+  const upBuf  = new Uint8Array(LIMITS.upChunkMiBMax * 1024 * 1024); // zeros
+  const upBlob = new Blob([upBuf], { type:'application/octet-stream' });
+
+  // ---- primitives ----
+  async function fetchUpload(bytes, signal) {
+    const want = Math.min(bytes, upBuf.byteLength);
+    const body = upBlob.slice(0, want, 'application/octet-stream');
+    const t0 = performance.now();
+    try {
+      await fetch(`${WORKER}/upload?nonce=${nonce()}`, {
+        method:'POST', body, cache:'no-store',
+        headers:{ 'Content-Type': 'application/octet-stream' },
+        signal
+      });
+      return { bytes: want, secs: (performance.now() - t0) / 1000 };
+    } catch (e) {
+      // fallback once at 2 MiB if larger failed
+      const small = Math.min(2 * 1024 * 1024, want);
+      if (small < want) {
+        const t1 = performance.now();
         await fetch(`${WORKER}/upload?nonce=${nonce()}`, {
-          method: 'POST',
-          body,
-          cache: 'no-store',
-          headers: { 'Content-Type': 'application/octet-stream' },
+          method:'POST',
+          body: upBlob.slice(0, small, 'application/octet-stream'),
+          cache:'no-store',
+          headers:{ 'Content-Type': 'application/octet-stream' },
           signal
         });
-        return { bytes: want, secs: (performance.now() - t0) / 1000 };
-      } catch (e) {
-        const small = Math.min(2 * 1024 * 1024, want);
-        if (small < want) {
-          const t1 = performance.now();
-          await fetch(`${WORKER}/upload?nonce=${nonce()}`, {
-            method: 'POST',
-            body: upBlob.slice(0, small, 'application/octet-stream'),
-            cache: 'no-store',
-            headers: { 'Content-Type': 'application/octet-stream' },
-            signal
-          });
-          return { bytes: small, secs: (performance.now() - t1) / 1000 };
-        }
-        throw e;
+        return { bytes: small, secs: (performance.now() - t1) / 1000 };
       }
-    }  // ✅ ← this closing brace was missing before
-  
-    async function fetchDownload(bytes, slabMiB, signal) {
-      const t0 = performance.now();
-      const r = await fetch(`${WORKER}/download?bytes=${bytes}&slabMiB=${slabMiB}&nonce=${nonce()}`, {
-        cache: 'no-store', signal
-      });
-      await r.arrayBuffer();
-      return { bytes, secs: (performance.now() - t0) / 1000 };
+      throw e;
     }
-  
-    async function parallelN(n, fn) {
-      const t0 = performance.now();
-      const res = await Promise.allSettled(Array.from({length:n}, fn));
-      let bytes = 0;
-      for (const r of res) if (r.status === 'fulfilled') bytes += (r.value.bytes||0);
-      const secs = (performance.now() - t0) / 1000;
-      return { bytes, secs };
-    }
-  
-    // ---- test orchestrator ----
-    line(`$ iperf3 -c edge-auto -t ${DURATION} -P ${PARALLEL}`);
-    line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
-  
-    let dnChunkMiB = START_CHUNK_MIB;
-    let upChunk = Math.min(START_CHUNK_MIB, LIMITS.upChunkMiBMax) * 1024 * 1024;
-    let totalUpBytes = 0, totalDnBytes = 0;
-    const start = performance.now();
-  
-    for (let sec = 0; sec < DURATION; sec++) {
-      const secStart = performance.now();
-      const controller = new AbortController();
-      const dir = (sec % 2 === 0) ? 'rcv' : 'snd';
-      let bytes = 0, secs = 0;
-  
-      try {
-        if (dir === 'rcv') {
-          const perStream = dnChunkMiB * 1024 * 1024;
-          ({ bytes, secs } = await parallelN(PARALLEL, () =>
-            fetchDownload(perStream, dnChunkMiB, controller.signal)
-          ));
-          totalDnBytes += bytes;
-          if (secs < 0.6 && dnChunkMiB < LIMITS.dnChunkMiBMax) dnChunkMiB = Math.min(LIMITS.dnChunkMiBMax, dnChunkMiB * 2);
-          if (secs > 1.6 && dnChunkMiB > 1) dnChunkMiB = Math.max(1, Math.floor(dnChunkMiB / 2));
-        } else {
-          const perStream = upChunk;
-          ({ bytes, secs } = await parallelN(PARALLEL, () =>
-            fetchUpload(perStream, controller.signal)
-          ));
-          totalUpBytes += bytes;
-          if (secs < 0.6 && upChunk < LIMITS.upChunkMiBMax*1024*1024) upChunk = Math.min(LIMITS.upChunkMiBMax*1024*1024, upChunk * 2);
-          if (secs > 1.6 && upChunk > 512*1024) upChunk = Math.max(512*1024, Math.floor(upChunk / 2));
-        }
-      } catch (e) {
-        controller.abort();
+  } // <-- IMPORTANT: closed correctly
+
+  async function fetchDownload(bytes, slabMiB, signal) {
+    const t0 = performance.now();
+    const r = await fetch(`${WORKER}/download?bytes=${bytes}&slabMiB=${slabMiB}&nonce=${nonce()}`, {
+      cache:'no-store', signal
+    });
+    await r.arrayBuffer();
+    return { bytes, secs: (performance.now() - t0) / 1000 };
+  } // <-- closed
+
+  async function parallelN(n, fn) {
+    const t0 = performance.now();
+    const res = await Promise.allSettled(Array.from({ length: n }, fn));
+    let bytes = 0;
+    for (const r of res) if (r.status === 'fulfilled') bytes += (r.value.bytes || 0);
+    const secs = (performance.now() - t0) / 1000;
+    return { bytes, secs };
+  } // <-- closed
+
+  // ---- orchestrator ----
+  wrap(`$ iperf3 -c edge-auto -t ${DURATION} -P ${PARALLEL}`);
+  wrap('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+
+  let dnChunkMiB = Math.min(START_CHUNK_MIB, LIMITS.dnChunkMiBMax);
+  let upChunk    = Math.min(START_CHUNK_MIB, LIMITS.upChunkMiBMax) * 1024 * 1024;
+
+  let totalUpBytes = 0, totalDnBytes = 0;
+  const start = performance.now();
+
+  for (let sec = 0; sec < DURATION; sec++) {
+    const dir = (sec % 2 === 0) ? 'rcv' : 'snd';
+    let bytes = 0, secs = 0;
+
+    try {
+      if (dir === 'rcv') {
+        const perStream = dnChunkMiB * 1024 * 1024;
+        ({ bytes, secs } = await parallelN(PARALLEL, () =>
+          fetchDownload(perStream, dnChunkMiB, undefined)
+        ));
+        totalDnBytes += bytes;
+
+        // adapt chunk size for next time
+        if (secs < 0.6 && dnChunkMiB < LIMITS.dnChunkMiBMax) dnChunkMiB = Math.min(LIMITS.dnChunkMiBMax, dnChunkMiB * 2);
+        if (secs > 1.6 && dnChunkMiB > 1) dnChunkMiB = Math.max(1, Math.floor(dnChunkMiB / 2));
+      } else {
+        const perStream = upChunk;
+        ({ bytes, secs } = await parallelN(isMobile ? Math.min(PARALLEL,2) : PARALLEL, () =>
+          fetchUpload(perStream, undefined)
+        ));
+        totalUpBytes += bytes;
+
+        if (secs < 0.6 && upChunk < LIMITS.upChunkMiBMax*1024*1024) upChunk = Math.min(LIMITS.upChunkMiBMax*1024*1024, upChunk * 2);
+        if (secs > 1.6 && upChunk > 512*1024) upChunk = Math.max(512*1024, Math.floor(upChunk / 2)); // min 0.5 MiB
       }
-  
-      const i0 = pad(sec, 2), i1 = pad(sec+1, 2);
-      const mib = (bytes/(1024*1024));
-      const mbit = (bytes*8/1e6) / Math.max(secs, 1e-6);
-      line(`[SUM]   ${i0}- ${i1} sec   ${pad(mib.toFixed(2),7)}        ${pad(mbit.toFixed(1),7)}       ${dir}`);
+    } catch (e) {
+      // swallow slice error; continue next second
     }
-  
-    const dur = (performance.now() - start)/1000;
-    const upMiB = (totalUpBytes/(1024*1024)).toFixed(2);
-    const dnMiB = (totalDnBytes/(1024*1024)).toFixed(2);
-    const upMbit = ((totalUpBytes*8/1e6)/dur);
-    const dnMbit = ((totalDnBytes*8/1e6)/dur);
-    const w = Math.max(20, Math.min(50, term.cols - 30));
-  
-    line(`[SUM]  0.00-${dur.toFixed(2)} sec   ${pad(upMiB,7)}        ${pad(upMbit.toFixed(1),7)}       snd  (P=${PARALLEL})`);
-    line(`[SUM]  0.00-${dur.toFixed(2)} sec   ${pad(dnMiB,7)}        ${pad(dnMbit.toFixed(1),7)}       rcv  (P=${PARALLEL})`);
-    line('+' + '-'.repeat(w+28) + '+');
-    line(`| Duration: ${pad(dur.toFixed(2),5)} s   Streams: ${pad(PARALLEL,2)}   Chunk*: ${pad(START_CHUNK_MIB,2)} MiB  |`);
-    line(`| Up:    ${pad(upMiB,8)} MiB   ${pad(upMbit.toFixed(1),7)} Mbit/s  ${bar(Math.min(1, upMbit/2000), w)} |`);
-    line(`| Down:  ${pad(dnMiB,8)} MiB   ${pad(dnMbit.toFixed(1),7)} Mbit/s  ${bar(Math.min(1, dnMbit/2000), w)} |`);
-    line('+' + '-'.repeat(w+28) + '+');
-    line(`* Adaptive per second; tune start with ?t=${DURATION}&p=${PARALLEL}&chunk=${START_CHUNK_MIB}  . Units: MiB (2^20), Mbit/s (10^6).`);
+
+    const i0 = pad(sec, 2), i1 = pad(sec+1, 2);
+    const mib  = toMiB(bytes).toFixed(2);
+    const mbit = toMb(bytes, Math.max(secs, 1e-6)).toFixed(1);
+    wrap(`[SUM]   ${i0}- ${i1} sec   ${pad(mib,7)}        ${pad(mbit,7)}       ${dir}`);
   }
-  
-  addEventListener('DOMContentLoaded', boot);
-  </script>  
+
+  const dur = (performance.now() - start) / 1000;
+  const upMiB = toMiB(totalUpBytes).toFixed(2);
+  const dnMiB = toMiB(totalDnBytes).toFixed(2);
+  const upMbit = toMb(totalUpBytes, dur);
+  const dnMbit = toMb(totalDnBytes, dur);
+
+  const width = Math.max(20, Math.min(50, term.cols - 30));
+  const barLine = (v, max)=>
+    '█'.repeat(Math.max(0, Math.min(width, Math.round((v/max)*width)))) +
+    '·'.repeat(Math.max(0, width - Math.round((v/max)*width)));
+
+  wrap(`[SUM]  0.00-${dur.toFixed(2)} sec   ${pad(upMiB,7)}        ${pad(upMbit.toFixed(1),7)}       snd  (P=${PARALLEL})`);
+  wrap(`[SUM]  0.00-${dur.toFixed(2)} sec   ${pad(dnMiB,7)}        ${pad(dnMbit.toFixed(1),7)}       rcv  (P=${PARALLEL})`);
+  wrap('+' + '-'.repeat(width+28) + '+');
+  wrap(`| Duration: ${pad(dur.toFixed(2),5)} s   Streams: ${pad(PARALLEL,2)}   Chunk*: ${pad(START_CHUNK_MIB,2)} MiB  |`);
+  wrap(`| Up:    ${pad(upMiB,8)} MiB   ${pad(upMbit.toFixed(1),7)} Mbit/s  ${barLine(upMbit, 2000)} |`);
+  wrap(`| Down:  ${pad(dnMiB,8)} MiB   ${pad(dnMbit.toFixed(1),7)} Mbit/s  ${barLine(dnMbit, 2000)} |`);
+  wrap('+' + '-'.repeat(width+28) + '+');
+  wrap(`* Adaptive per second; tune start with ?t=${DURATION}&p=${PARALLEL}&chunk=${START_CHUNK_MIB}  . Units: MiB (2^20), Mbit/s (10^6).`);
+} // <-- boot() ends cleanly
+
+addEventListener('DOMContentLoaded', boot);
+</script>
