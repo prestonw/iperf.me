@@ -8,8 +8,6 @@
   header { padding:12px 16px; border-bottom:1px solid #1d2633; display:flex; gap:12px; align-items:center }
   .badge { background:#142033; padding:4px 8px; border-radius:6px; font-size:12px; color:#a5b4c4 }
   #terminal { height: calc(100vh - 54px) }
-  a { color:#69b8ff; text-decoration:none }
-  a:hover { text-decoration:underline }
   .sep { opacity:.5 }
 </style>
 
@@ -21,7 +19,6 @@
 </header>
 <div id="terminal"></div>
 
-<!-- Local assets (no CDN) -->
 <script defer src="vendor/xterm/xterm.min.js"></script>
 <script defer src="vendor/xterm/xterm-addon-fit.js"></script>
 
@@ -35,12 +32,11 @@ try {
 
 function start() {
   if (!(window.Terminal && window.FitAddon)) {
-    document.getElementById('terminal').textContent =
-      'Failed to load terminal assets.';
+    document.getElementById('terminal').textContent = 'Failed to load terminal assets.';
     return;
   }
 
-  const term = new Terminal({ theme:{ background:'#0b0e12' }, scrollback: 1000 });
+  const term = new Terminal({ theme:{ background:'#0b0e12' }, scrollback: 2000 });
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(document.getElementById('terminal'));
@@ -55,150 +51,139 @@ function start() {
   const padL = (s, w) => String(s).padStart(w, ' ');
   const padR = (s, w) => String(s).padEnd(w, ' ');
 
-  // --- Units helpers: MiB for transfer, Mbit/s for bitrate ---
-  const BtoMiB = b => b / (1024 * 1024);        // mebibytes
-  const BpsToMbit = bps => (bps * 8) / 1e6;     // bits/second (decimal)
+  // --- Units ---
+  const BtoMiB = b => b / (1024 * 1024);         // MiB (2^20)
+  const winBytesToMbit = winBytes => (winBytes * 8) / 1e6; // Mbit/s (decimal)
 
-  // --- URL-configurable knobs ---
-  const params = new URLSearchParams(location.search);
-  const durationSec = Math.max(1, Math.min(60, parseInt(params.get('t') || '8', 10))); // default 8s
-  const P = Math.max(1, Math.min(8, parseInt(params.get('p') || '2', 10)));            // parallel streams
-  // Chunk size per request: keep below Worker 64 MiB cap; smaller gives smoother intervals
-  const chunkMiB = Math.max(1, Math.min(32, parseInt(params.get('chunk') || '16', 10)));
-  const CHUNK_BYTES = chunkMiB * 1024 * 1024;
+  // --- Config knobs from URL ---
+  const q = new URLSearchParams(location.search);
+  const durationSec = Math.max(5, Math.min(30, parseInt(q.get('t') || '10', 10)));
+  const P = Math.max(1, Math.min(8, parseInt(q.get('p') || '4', 10)));
+  let   chunkMiB = Math.max(4, Math.min(64, parseInt(q.get('chunk') || '32', 10))); // start point
+  const MAX_CHUNK_MIB = 64;    // matches Worker cap
+  const MIN_CHUNK_MIB = 4;
 
-  // --- Shared counters for interval printing ---
+  // --- Adaptive thresholds (per 1s interval downlink) ---
+  const UP_SCALE_THRESH   = 700;   // Mbit/s -> double chunk
+  const DOWN_SCALE_THRESH = 200;   // Mbit/s -> halve chunk
+
+  // --- State for intervals ---
   let upBytesTotal = 0, downBytesTotal = 0;
-  let upBytesWin = 0, downBytesWin = 0;
-
-  // Interval ticker (1s) like iPerf intervals, server-clock would be ideal later
-  let intervalTimer = null;
+  let upWin = 0, downWin = 0;
   let elapsedSec = 0;
+  let ticker = null;
 
   function printHeader() {
     line(`$ iperf3 -c edge-auto -t ${durationSec} -P ${P}`);
     line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+    line('[SUM]   0.00-?           (calculating)');
   }
 
   function printInterval() {
     elapsedSec++;
-    if (upBytesWin > 0) {
-      const mb = BtoMiB(upBytesWin);
-      const mbit = BpsToMbit(upBytesWin); // since window is ~1s, bytes ≈ B/s
-      line(`[SUM]  ${padL((elapsedSec-1).toFixed(0),4)}-${padL(elapsedSec.toFixed(0),4)} sec   ${padL(mb.toFixed(2),10)}        ${padL(mbit.toFixed(1),10)}       snd`);
-      upBytesWin = 0;
+    // Upload (coarse - we add per POST completion)
+    if (upWin > 0) {
+      line(`[SUM]  ${padL((elapsedSec-1).toFixed(0),4)}-${padL(elapsedSec.toFixed(0),4)} sec   ${padL(BtoMiB(upWin).toFixed(2),10)}        ${padL(winBytesToMbit(upWin).toFixed(1),10)}       snd`);
+      upWin = 0;
     }
-    if (downBytesWin > 0) {
-      const mb = BtoMiB(downBytesWin);
-      const mbit = BpsToMbit(downBytesWin);
-      line(`[SUM]  ${padL((elapsedSec-1).toFixed(0),4)}-${padL(elapsedSec.toFixed(0),4)} sec   ${padL(mb.toFixed(2),10)}        ${padL(mbit.toFixed(1),10)}       rcv`);
-      downBytesWin = 0;
+    // Download (fine - stream read)
+    if (downWin > 0) {
+      const mbit = winBytesToMbit(downWin);
+      line(`[SUM]  ${padL((elapsedSec-1).toFixed(0),4)}-${padL(elapsedSec.toFixed(0),4)} sec   ${padL(BtoMiB(downWin).toFixed(2),10)}        ${padL(mbit.toFixed(1),10)}       rcv`);
+      // Adaptive chunk sizing based on observed per-second rate
+      if (mbit > UP_SCALE_THRESH && chunkMiB < MAX_CHUNK_MIB) {
+        chunkMiB = Math.min(MAX_CHUNK_MIB, chunkMiB * 2);
+      } else if (mbit < DOWN_SCALE_THRESH && chunkMiB > MIN_CHUNK_MIB) {
+        chunkMiB = Math.max(MIN_CHUNK_MIB, Math.floor(chunkMiB / 2));
+      }
+      downWin = 0;
     }
   }
 
-  // --- Upload worker: loop POSTs until time is up (P parallel) ---
+  // --- Upload worker: loop POSTs until end ---
   async function uploadLoop(endTs) {
     while (performance.now() < endTs) {
-      // Zero-filled payload (fast, no compression applied to request bodies)
-      const payload = new Uint8Array(CHUNK_BYTES);
-      const t0 = performance.now();
-      const res = await fetch(WORKER + '/upload', { method: 'POST', body: payload });
+      const bytes = chunkMiB * 1024 * 1024;
+      const payload = new Uint8Array(bytes); // zeros; requests are not compressed
+      const res = await fetch(WORKER + '/upload', { method:'POST', body: payload });
       if (!res.ok) break;
-      upBytesTotal += CHUNK_BYTES;
-      // Attribute bytes to current window; coarse (on completion), but OK for browser-side
-      upBytesWin += CHUNK_BYTES;
-      // Yield a tick to avoid starving the event loop
+      upBytesTotal += bytes;
+      upWin += bytes;
       await new Promise(r => setTimeout(r, 0));
-      // If we’re near the end, stop
-      if (performance.now() - t0 > 2000 && performance.now() >= endTs) break;
     }
   }
 
-  // --- Download worker: stream reader, attributing bytes to 1s windows precisely ---
+  // --- Download worker: stream with flip pattern + nonce ---
   async function downloadLoop(endTs) {
     while (performance.now() < endTs) {
-      const remainingMs = endTs - performance.now();
-      if (remainingMs <= 50) break;
+      const remaining = endTs - performance.now();
+      if (remaining <= 30) break;
 
-      const toGet = Math.min(CHUNK_BYTES, 64 * 1024 * 1024); // safety cap
-      const resp = await fetch(WORKER + '/download?bytes=' + toGet);
+      // Cache-buster: unique nonce each request; pattern=flip to mutate bytes
+      const bytes = Math.min(chunkMiB, MAX_CHUNK_MIB) * 1024 * 1024;
+      const nonce = Math.random().toString(36).slice(2);
+      const url = `${WORKER}/download?bytes=${bytes}&pattern=flip&slabMiB=1&nonce=${nonce}`;
+
+      const resp = await fetch(url);
       if (!resp.ok || !resp.body) break;
-
       const reader = resp.body.getReader();
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        downBytesTotal += value.byteLength;
-        downBytesWin += value.byteLength;
-        if (performance.now() >= endTs) {
-          try { reader.cancel(); } catch {}
-          break;
-        }
+        const n = value.byteLength;
+        downBytesTotal += n;
+        downWin += n;
+        if (performance.now() >= endTs) { try { reader.cancel(); } catch {} break; }
       }
+      await new Promise(r => setTimeout(r, 0));
     }
   }
 
   async function runTest() {
     printHeader();
-    line('[SUM]   0.00-?           (calculating)');
 
-    // Optional tiny warm-up to avoid handshake/slow-start bias
+    // Tiny warmup to hide handshake/slow-start blip
     try {
-      const warm = await fetch(WORKER + '/download?bytes=' + (1 * 1024 * 1024));
-      await warm.arrayBuffer();
+      const r0 = await fetch(`${WORKER}/download?bytes=${1*1024*1024}&pattern=flip&nonce=${Math.random()}`);
+      await r0.arrayBuffer();
     } catch {}
 
-    const startTs = performance.now();
-    const endTs = startTs + durationSec * 1000;
+    const start = performance.now();
+    const end = start + durationSec * 1000;
 
-    // Start interval ticker
-    intervalTimer = setInterval(printInterval, 1000);
+    ticker = setInterval(printInterval, 1000);
+    const ups = Array.from({length: P}, () => uploadLoop(end));
+    const dns = Array.from({length: P}, () => downloadLoop(end));
+    await Promise.allSettled([...ups, ...dns]);
+    clearInterval(ticker);
+    printInterval(); // flush residual
 
-    // Kick off P upload & P download loops
-    const upLoops = Array.from({ length: P }, () => uploadLoop(endTs));
-    const downLoops = Array.from({ length: P }, () => downloadLoop(endTs));
+    const dur = (performance.now() - start) / 1000;
+    const upMiB = BtoMiB(upBytesTotal), downMiB = BtoMiB(downBytesTotal);
+    const upMbit = (upBytesTotal * 8 / 1e6) / dur;
+    const downMbit = (downBytesTotal * 8 / 1e6) / dur;
 
-    await Promise.allSettled([...upLoops, ...downLoops]);
-
-    clearInterval(intervalTimer);
-    // Print any remaining window bytes as the last interval
-    printInterval();
-
-    // Final summary lines (like iPerf)
-    const totalDur = (performance.now() - startTs) / 1000;
-    const upMiB = BtoMiB(upBytesTotal);
-    const downMiB = BtoMiB(downBytesTotal);
-    const upMbit = (upBytesTotal * 8 / 1e6) / totalDur;
-    const downMbit = (downBytesTotal * 8 / 1e6) / totalDur;
-
-    line(`[SUM]  0.00-${totalDur.toFixed(2)} sec   ${padL(upMiB.toFixed(2),10)}        ${padL(upMbit.toFixed(1),10)}       snd  (P=${P})`);
-    line(`[SUM]  0.00-${totalDur.toFixed(2)} sec   ${padL(downMiB.toFixed(2),10)}        ${padL(downMbit.toFixed(1),10)}       rcv  (P=${P})`);
+    line(`[SUM]  0.00-${dur.toFixed(2)} sec   ${padL(upMiB.toFixed(2),10)}        ${padL(upMbit.toFixed(1),10)}       snd  (P=${P}, chunk≈${chunkMiB} MiB)`);
+    line(`[SUM]  0.00-${dur.toFixed(2)} sec   ${padL(downMiB.toFixed(2),10)}        ${padL(downMbit.toFixed(1),10)}       rcv  (P=${P}, chunk≈${chunkMiB} MiB)`);
     line('');
 
-    // ASCII art summary
     const bar = (v, max) => {
       const width = Math.max(10, Math.min(50, term.cols - 20));
       const n = Math.max(0, Math.min(width, Math.round((v / max) * width)));
       return '█'.repeat(n) + '·'.repeat(width - n);
     };
-    const peak = Math.max(50, upMbit, downMbit); // scale
+    const peak = Math.max(50, upMbit, downMbit);
     line('+-------------------- iperf.me summary --------------------+');
-    line('| Duration: ' + padR(totalDur.toFixed(2) + ' s', 13) + '   Streams: ' + padR(String(P), 2) + '   Chunk: ' + padR(String(chunkMiB) + ' MiB', 8) + ' |');
-    line('| Up:   ' + padL(upMiB.toFixed(2), 9) + ' MiB  ' + padL(upMbit.toFixed(1), 8) + ' Mbit/s  ' + bar(upMbit, peak) + ' |');
+    line('| Duration: ' + padR(dur.toFixed(2) + ' s', 13) + '   Streams: ' + padR(String(P), 2) + '   Chunk*: ' + padR(String(chunkMiB) + ' MiB', 8) + ' |');
+    line('| Up:   '  + padL(upMiB.toFixed(2), 9) + ' MiB  ' + padL(upMbit.toFixed(1), 8) + ' Mbit/s  ' + bar(upMbit,  peak) + ' |');
     line('| Down: ' + padL(downMiB.toFixed(2), 9) + ' MiB  ' + padL(downMbit.toFixed(1), 8) + ' Mbit/s  ' + bar(downMbit, peak) + ' |');
     line('+-----------------------------------------------------------+');
-
     line('');
-    line('Tips: change duration/streams/chunk with ?t=10&p=4&chunk=16  (MiB/chunk)');
-    line('Units: Transfer = MiB (2^20), Bitrate = Mbit/s (10^6)');
+    line('* Adaptive per second; tune start with ?t=10&p=4&chunk=32 . Units: MiB (2^20), Mbit/s (10^6).');
   }
 
   (async () => {
-    try {
-      await runTest();
-    } catch (e) {
-      line('Error: ' + (e?.message || e));
-    }
+    try { await runTest(); } catch (e) { line('Error: ' + (e?.message || e)); }
   })();
 }
 
