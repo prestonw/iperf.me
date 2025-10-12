@@ -1,15 +1,16 @@
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
+
     const cors = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
-      'Cache-Control': 'no-store',
+      'Cache-Control': 'no-store, no-transform',
     };
     if (req.method === 'OPTIONS') return new Response(null, { headers: cors });
 
-    // ---- Timed streaming UPLOAD: POST /u?t=SECONDS ----
+    // -------- Timed streaming UPLOAD (client sends data): POST /u?t=SECONDS --------
     if (url.pathname === '/u' && req.method === 'POST') {
       const tSec = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
       let bytes = 0;
@@ -31,27 +32,38 @@ export default {
       });
     }
 
-    // ---- Timed streaming DOWNLOAD: GET /d?t=SECONDS&slabMiB=8 ----
+    // -------- Timed streaming DOWNLOAD (server sends data): GET /d?t=SECONDS&slabMiB=32 --------
     if (url.pathname === '/d' && req.method === 'GET') {
       const tSec = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
-      const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '8', 10), 64));
+      const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
       const deadline = Date.now() + tSec * 1000;
 
+      // Prebuild one slab with a simple 0/1 pattern (defeats compression/caching)
       const slab = new Uint8Array(slabMiB * 1024 * 1024);
-      for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0; // flip pattern
+      for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
 
       const stream = new ReadableStream({
         pull(controller) {
-          if (Date.now() >= deadline) { controller.close(); return; }
-          controller.enqueue(slab);
+          // Enqueue repeatedly while downstream has demand and time remains
+          while ((controller.desiredSize ?? 0) > 0) {
+            if (Date.now() >= deadline) { controller.close(); return; }
+            controller.enqueue(slab);
+          }
         }
       });
-      return new Response(stream, { headers: { ...cors, 'Content-Type': 'application/octet-stream' } });
+
+      return new Response(stream, {
+        headers: {
+          ...cors,
+          'Content-Type': 'application/octet-stream',
+          'X-Accel-Buffering': 'no' // hint proxies not to buffer
+        }
+      });
     }
 
-    // ---- Legacy endpoints (bounded blobs) ----
+    // -------- Legacy: bounded upload blob --------
     if (url.pathname === '/upload' && req.method === 'POST') {
-      const MAX = 10 * 1024 * 1024; // 10 MiB cap
+      const MAX = 10 * 1024 * 1024; // 10 MiB per request (burst mode)
       let received = 0;
       const reader = req.body?.getReader?.();
       if (!reader) {
@@ -76,9 +88,10 @@ export default {
       });
     }
 
+    // -------- Legacy: bounded download --------
     if (url.pathname === '/download' && req.method === 'GET') {
       const want = Math.min(parseInt(url.searchParams.get('bytes') || '10485760', 10), 64 * 1024 * 1024);
-      const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '8', 10), 64));
+      const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
       const slab = new Uint8Array(slabMiB * 1024 * 1024);
       for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
       const stream = new ReadableStream({
@@ -95,6 +108,7 @@ export default {
       return new Response(stream, { headers: { ...cors, 'Content-Type': 'application/octet-stream' } });
     }
 
+    // -------- Health --------
     if (url.pathname === '/health') {
       return new Response(JSON.stringify({ ok: true, ts: Date.now() }), {
         headers: { 'Content-Type': 'application/json', ...cors }

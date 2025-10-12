@@ -1,43 +1,54 @@
 <!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>iperf.me</title>
+<title>iperf.me — MVP</title>
+
 <link rel="stylesheet" href="vendor/xterm/xterm.min.css" />
 <style>
-  :root{--bg:#0b0e12;--fg:#e6edf3;--line:#1d2633}
+  :root{--bg:#0b0e12;--fg:#e6edf3;--mut:#a5b4c4;--line:#1d2633;--pill:#142033}
   html,body{height:100%}
-  body{margin:0;background:var(--bg);color:var(--fg);
-       font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
-       font-size:12px;line-height:1.15}
-  #terminal{height:100vh}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+    font-size:12px;line-height:1.15;
+    -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale
+  }
+  header{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+  .badge{background:var(--pill);color:var(--mut);padding:3px 6px;border-radius:6px;font-size:11px;white-space:nowrap}
+  .sep{opacity:.5}
+  #terminal{height:calc(100vh - 46px)}
 </style>
 
+<header>
+  <strong>iperf.me</strong><span class="sep">|</span>
+  <span class="badge">edge-friendly</span>
+  <span class="badge">iPerf-style</span>
+  <span style="margin-left:auto;font-size:11px;color:#8fa5b7">Inspired by iPerf3 (BSD, ESnet). Not affiliated.</span>
+</header>
 <div id="terminal"></div>
 
 <script defer src="vendor/xterm/xterm.min.js"></script>
 <script defer src="vendor/xterm/xterm-addon-fit.js"></script>
+
 <script>
 (async function(){
-  // ---------------- Params ----------------
+  // ---------- params ----------
   let WORKER = 'https://edge.iperf.me';
   try { const u = new URL(location.href); WORKER = u.searchParams.get('worker') || WORKER; } catch {}
-  const q = new URLSearchParams(location.search);
-  const T  = Math.max(1, Math.min(parseInt(q.get('t')||'10',10), 60));   // seconds
-  const P  = Math.max(1, Math.min(parseInt(q.get('p')||'4',10), 8));     // parallel streams (used in -R phase)
-  const slabMiB = Math.max(1, Math.min(parseInt(q.get('chunk')||'32',10), 64));
+  const q       = new URLSearchParams(location.search);
+  const T       = Math.max(1, Math.min(parseInt(q.get('t')||'10',10), 60));      // seconds
+  const P       = Math.max(1, Math.min(parseInt(q.get('p')||'4',10), 8));        // parallel streams (reverse)
+  const slabMiB = Math.max(1, Math.min(parseInt(q.get('chunk')||'32',10), 64));  // server chunk size for download
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
-  // ---------------- Terminal ----------------
+  // ---------- terminal ----------
   await new Promise(r => addEventListener('DOMContentLoaded', r, { once:true }));
   if (!(window.Terminal && window.FitAddon)) { document.getElementById('terminal').textContent='terminal load error'; return; }
   const term = new Terminal({ theme:{ background:'#0b0e12' }, fontSize:12, lineHeight:1.15, scrollback:2000, convertEol:true });
   const fit  = new FitAddon.FitAddon();
   term.loadAddon(fit); term.open(document.getElementById('terminal')); fit.fit();
   addEventListener('resize', () => fit.fit());
-  const line = s => {
-    const max = Math.max(1, term.cols - 1);
-    for (let i=0; i<s.length; i+=max) term.writeln(s.slice(i, i+max));
-  };
+  const line = s => { const max=Math.max(1,term.cols-1); for(let i=0;i<s.length;i+=max) term.writeln(s.slice(i,i+max)); };
   const pad  = (v,w)=> String(v).padStart(w,' ');
   const toMiB= b => b/(1024*1024);                       // MiB (2^20)
   const toMb = (b,s)=> (b*8/1e6)/Math.max(s,1e-6);       // Mbit/s (10^6)
@@ -58,18 +69,20 @@
     }
   }
 
-  // ---------------- Upload run: iperf3 -c <server> -t T -P 1 ----------------
-  // Robust everywhere: rapid POST bursts to /upload for T seconds.
+  // =========================================================
+  // 1) Upload: iperf3 -c edge-auto -t T -P 1
+  // =========================================================
   line(`$ iperf3 -c edge-auto -t ${T} -P 1`);
   line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
 
   const upChunk = 1024*1024*(isMobile ? 2 : 4); // 2 MiB mobile, 4 MiB desktop
   const upBuf   = new Uint8Array(upChunk);
   const upBlob  = new Blob([upBuf], { type:'application/octet-stream' });
-  let upBytes = 0;
 
+  let upBytes = 0;
   const upStart = performance.now();
   const upUntil = upStart + T*1000;
+
   const upTicker = printAnchored(()=>upBytes, 'snd', T, upStart);
 
   (async () => {
@@ -88,41 +101,37 @@
   line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(upBytes).toFixed(2),7)}        ${pad(toMb(upBytes,T).toFixed(1),7)}       snd  (P=1)`);
   line('');
 
-  // ---------------- Download run (reverse): iperf3 -c <server> -R -t T -P P ----------------
-  // One long-lived fetch per stream; read until T seconds; abort cleanly.
+  // =========================================================
+  // 2) Reverse: iperf3 -c edge-auto -R -t T -P P
+  // =========================================================
   line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
   line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
 
   let dnBytes = 0;
   const dnStart = performance.now();
   const dnUntil = dnStart + T*1000;
+
   const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
 
-  async function dnTask(){
-    // Request a very large byte stream so it lasts > T seconds; we will abort.
-    const bigBytes = 1024 * 1024 * slabMiB * 4096; // e.g., 32 MiB * 4096 = 128 GiB max theoretical
+  async function dnTask() {
+    // One long stream per parallel worker; server streams for T seconds.
     const ac = new AbortController();
-    const timeout = setTimeout(() => ac.abort('deadline'), Math.max(0, dnUntil - performance.now()));
-    try {
-      const r = await fetch(`${WORKER}/download?bytes=${bigBytes}&slabMiB=${slabMiB}&nonce=${nonce()}`, {
-        cache:'no-store', signal: ac.signal
-      });
-      const reader = r.body.getReader();
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        dnBytes += value.byteLength;
-        if (performance.now() >= dnUntil) break; // safety
-      }
-    } catch(e) {
-      // Abort expected at deadline; ignore.
-    } finally {
-      clearTimeout(timeout);
+    const r = await fetch(`${WORKER}/d?t=${T}&slabMiB=${slabMiB}&nonce=${nonce()}`, {
+      cache:'no-store', signal: ac.signal
+    });
+    const reader = r.body.getReader();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      dnBytes += value.byteLength;
+      if (performance.now() >= dnUntil) { ac.abort('deadline'); break; }
     }
   }
 
+  // Important: start all streams immediately and let them run for T seconds
   await Promise.allSettled(Array.from({length:P}, () => dnTask()));
   await dnTicker;
+
   line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${P})`);
 })();
 </script>
