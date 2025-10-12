@@ -1,58 +1,46 @@
 <!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>iperf.me — MVP</title>
+<title>iperf.me</title>
 <link rel="stylesheet" href="vendor/xterm/xterm.min.css" />
 <style>
-  :root{--bg:#0b0e12;--fg:#e6edf3;--mut:#a5b4c4;--line:#1d2633;--pill:#142033;--link:#69b8ff}
+  :root{--bg:#0b0e12;--fg:#e6edf3;--line:#1d2633}
   html,body{height:100%}
-  body{
-    margin:0;background:var(--bg);color:var(--fg);
-    font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
-    font-size:12px;line-height:1.15;
-    -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale
-  }
-  header{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
-  .badge{background:var(--pill);color:var(--mut);padding:3px 6px;border-radius:6px;font-size:11px;white-space:nowrap}
-  .sep{opacity:.5}
-  #terminal{height:calc(100vh - 46px)}
-  a{color:var(--link);text-decoration:none} a:hover{text-decoration:underline}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+       font-size:12px;line-height:1.15}
+  #terminal{height:100vh}
 </style>
 
-<header>
-  <strong>iperf.me</strong><span class="sep">|</span>
-  <span class="badge">edge-friendly, iPerf-style</span>
-  <span style="margin-left:auto;font-size:11px;color:#8fa5b7">Inspired by iPerf3 (BSD, ESnet). Not affiliated.</span>
-</header>
 <div id="terminal"></div>
 
 <script defer src="vendor/xterm/xterm.min.js"></script>
 <script defer src="vendor/xterm/xterm-addon-fit.js"></script>
-
 <script>
 (async function(){
-  /* ---------- params ---------- */
+  // ---------------- Params ----------------
   let WORKER = 'https://edge.iperf.me';
   try { const u = new URL(location.href); WORKER = u.searchParams.get('worker') || WORKER; } catch {}
   const q = new URLSearchParams(location.search);
-  const T  = Math.max(1, Math.min(parseInt(q.get('t')||'10',10), 60));         // seconds
-  const P  = Math.max(1, Math.min(parseInt(q.get('p')||'4',10), 8));           // download parallel
-  const slabMiB = Math.max(1, Math.min(parseInt(q.get('chunk')||'8',10), 64));  // download slab
+  const T  = Math.max(1, Math.min(parseInt(q.get('t')||'10',10), 60));   // seconds
+  const P  = Math.max(1, Math.min(parseInt(q.get('p')||'4',10), 8));     // parallel streams (used in -R phase)
+  const slabMiB = Math.max(1, Math.min(parseInt(q.get('chunk')||'32',10), 64));
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
-  /* ---------- terminal ---------- */
+  // ---------------- Terminal ----------------
   await new Promise(r => addEventListener('DOMContentLoaded', r, { once:true }));
-  if (!(window.Terminal && window.FitAddon)) { document.getElementById('terminal').textContent='Failed to load terminal assets.'; return; }
-  const term = new Terminal({ theme:{ background:'#0b0e12' }, fontSize:12, lineHeight:1.15, scrollback:1000, convertEol:true });
+  if (!(window.Terminal && window.FitAddon)) { document.getElementById('terminal').textContent='terminal load error'; return; }
+  const term = new Terminal({ theme:{ background:'#0b0e12' }, fontSize:12, lineHeight:1.15, scrollback:2000, convertEol:true });
   const fit  = new FitAddon.FitAddon();
   term.loadAddon(fit); term.open(document.getElementById('terminal')); fit.fit();
   addEventListener('resize', () => fit.fit());
-
-  const wrap = s => { const max=Math.max(1,term.cols-1); for(let i=0;i<s.length;i+=max) term.writeln(s.slice(i,i+max)); };
+  const line = s => {
+    const max = Math.max(1, term.cols - 1);
+    for (let i=0; i<s.length; i+=max) term.writeln(s.slice(i, i+max));
+  };
   const pad  = (v,w)=> String(v).padStart(w,' ');
-  const toMiB= b => b/(1024*1024);                     // MiB (2^20)
-  const toMb = (b,s)=> (b*8/1e6)/Math.max(s,1e-6);     // Mbit/s (10^6) == Mbps
-  const toGb = (mbps)=> mbps/1000;                      // Gbit/s (decimal)
+  const toMiB= b => b/(1024*1024);                       // MiB (2^20)
+  const toMb = (b,s)=> (b*8/1e6)/Math.max(s,1e-6);       // Mbit/s (10^6)
   const nonce= ()=> Math.random().toString(36).slice(2);
 
   async function printAnchored(getTotalBytes, dir, seconds, t0){
@@ -65,182 +53,76 @@
       const total = getTotalBytes();
       const deltaB = total - lastBytes;
       const deltaS = (now - lastBoundary)/1000;
-      wrap(`[SUM]   ${pad(s,2)}- ${pad(s+1,2)} sec   ${pad(toMiB(deltaB).toFixed(2),7)}        ${pad(toMb(deltaB,deltaS).toFixed(1),7)}       ${dir}`);
+      line(`[SUM]   ${pad(s,2)}- ${pad(s+1,2)} sec   ${pad(toMiB(deltaB).toFixed(2),7)}        ${pad(toMb(deltaB,deltaS).toFixed(1),7)}       ${dir}`);
       lastBytes = total; lastBoundary = now;
     }
   }
 
-  /* ========================= UPLOAD PHASE (hybrid) =========================
-     Try true streaming to /u; if no progress within 1.5s, abort and
-     fall back to reliable rapid POST bursts to /upload (2–4 MiB).
-     Debug lines are printed when switching/failing.
-  =========================================================================== */
-  wrap(`$ iperf3 -c edge-auto -u -t ${T} -P 1   # upload phase`);
-  wrap('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+  // ---------------- Upload run: iperf3 -c <server> -t T -P 1 ----------------
+  // Robust everywhere: rapid POST bursts to /upload for T seconds.
+  line(`$ iperf3 -c edge-auto -t ${T} -P 1`);
+  line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
 
-  const upChunkBytes = 1024*1024*(isMobile ? 2 : 4); // 2 MiB mobile, 4 MiB desktop
-  const upBuf  = new Uint8Array(upChunkBytes);
-  const upBlob = new Blob([upBuf], { type:'application/octet-stream' });
+  const upChunk = 1024*1024*(isMobile ? 2 : 4); // 2 MiB mobile, 4 MiB desktop
+  const upBuf   = new Uint8Array(upChunk);
+  const upBlob  = new Blob([upBuf], { type:'application/octet-stream' });
+  let upBytes = 0;
 
   const upStart = performance.now();
   const upUntil = upStart + T*1000;
+  const upTicker = printAnchored(()=>upBytes, 'snd', T, upStart);
 
-  let mode = 'stream';            // 'stream' | 'burst'
-  let upProduced = 0;             // bytes queued (stream)
-  let upConfirmed = 0;            // bytes confirmed by server (burst)
-  let streamingSucceeded = false; // set true once progress detected
-  let streamingDone = false;
-
-  // interval printer uses whichever counter is active
-  const upTicker = printAnchored(() => (mode === 'stream' ? upProduced : upConfirmed), 'snd', T, upStart);
-
-  // --- attempt streaming upload ---
-  async function tryStreaming() {
-    const ac = new AbortController();
-
-    const body = new ReadableStream({
-      pull(controller) {
-        // Enqueue repeatedly until backpressure says stop or deadline reached
-        while ((controller.desiredSize ?? 0) > 0 && performance.now() < upUntil) {
-          controller.enqueue(upBuf);
-          upProduced += upBuf.byteLength;
-        }
-        if (upProduced > 0 && !streamingSucceeded) {
-          streamingSucceeded = true;
-          wrap('[DBG] upload: streaming request body accepted, continuing…');
-        }
-        if (performance.now() >= upUntil) controller.close();
-      }
-    });
-
-    // watchdog: if no progress for 1.5s, fallback
-    const watchdog = setTimeout(() => {
-      if (!streamingSucceeded) {
-        wrap('[DBG] upload: no progress after 1.5s → falling back to burst POSTs');
-        mode = 'burst';
-        ac.abort('fallback');
-      }
-    }, 1500);
-
-    try {
-      const res = await fetch(`${WORKER}/u?t=${T}&nonce=${nonce()}`, {
-        method:'POST',
-        body,
-        cache:'no-store',
-        headers:{ 'Content-Type':'application/octet-stream' },
-        duplex:'half',
-        signal: ac.signal
-      });
-      clearTimeout(watchdog);
-      if (ac.signal.aborted) return; // we fell back
-      streamingDone = true;
-      if (!streamingSucceeded) {
-        // Made it through but never saw progress? Treat as failure and fallback.
-        wrap('[DBG] upload: streaming finished but no progress seen → fallback');
-        mode = 'burst';
-        return;
-      }
-      // We could parse res.json() for server bytes, but produced-bytes are OK for MVP final,
-      // since server counts aren't available until completion and we already timed to T sec.
-      wrap('[DBG] upload: streaming completed normally');
-    } catch (e) {
-      clearTimeout(watchdog);
-      if (ac.signal.aborted) return; // expected
-      wrap(`[DBG] upload: streaming fetch error → fallback (${String(e)})`);
-      mode = 'burst';
-    }
-  }
-
-  // --- burst fallback (or primary if streaming fails) ---
-  async function runBurst() {
+  (async () => {
     while (performance.now() < upUntil) {
-      const body = upBlob; // 2–4 MiB
       try {
         const res = await fetch(`${WORKER}/upload?nonce=${nonce()}`, {
-          method:'POST',
-          body,
-          cache:'no-store',
+          method:'POST', body: upBlob, cache:'no-store',
           headers:{ 'Content-Type':'application/octet-stream' }
         });
-        if (res.ok) upConfirmed += body.size;
-      } catch {
-        // best-effort: skip this packet, continue
+        if (res.ok) upBytes += upBlob.size;
+      } catch {}
+    }
+  })();
+
+  await upTicker;
+  line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(upBytes).toFixed(2),7)}        ${pad(toMb(upBytes,T).toFixed(1),7)}       snd  (P=1)`);
+  line('');
+
+  // ---------------- Download run (reverse): iperf3 -c <server> -R -t T -P P ----------------
+  // One long-lived fetch per stream; read until T seconds; abort cleanly.
+  line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
+  line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+
+  let dnBytes = 0;
+  const dnStart = performance.now();
+  const dnUntil = dnStart + T*1000;
+  const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
+
+  async function dnTask(){
+    // Request a very large byte stream so it lasts > T seconds; we will abort.
+    const bigBytes = 1024 * 1024 * slabMiB * 4096; // e.g., 32 MiB * 4096 = 128 GiB max theoretical
+    const ac = new AbortController();
+    const timeout = setTimeout(() => ac.abort('deadline'), Math.max(0, dnUntil - performance.now()));
+    try {
+      const r = await fetch(`${WORKER}/download?bytes=${bigBytes}&slabMiB=${slabMiB}&nonce=${nonce()}`, {
+        cache:'no-store', signal: ac.signal
+      });
+      const reader = r.body.getReader();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        dnBytes += value.byteLength;
+        if (performance.now() >= dnUntil) break; // safety
       }
+    } catch(e) {
+      // Abort expected at deadline; ignore.
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
-  // Kick streaming attempt; if it falls back, start bursts
-  await Promise.race([
-    (async()=>{ await tryStreaming(); })(),
-    (async()=>{ 
-      // Poll until mode switches to burst (watchdog or error), then run bursts
-      while (mode === 'stream' && !streamingDone && performance.now() < upUntil) {
-        await new Promise(r => setTimeout(r, 50));
-      }
-      if (mode === 'burst') await runBurst();
-    })()
-  ]);
-
-  await upTicker; // ensure we printed exactly T lines
-
-  // Final upload summary (choose confirmed if burst, else produced)
-  const upBytes = (mode === 'burst') ? upConfirmed : upProduced;
-  const upMiB = toMiB(upBytes).toFixed(2);
-  const upMb  = toMb(upBytes, T);
-  const upGb  = toGb(upMb);
-  wrap(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(upMiB,7)}        ${pad(upMb.toFixed(1),7)}       snd  (P=1)`);
-  wrap(`        ➤ ISP view: ${upMb.toFixed(1)} Mbps${upMb>=1000?`  (${upGb.toFixed(2)} Gbps)`:''}`);
-
-/* ======================== DOWNLOAD PHASE (timed streams) ====================== */
-wrap('');
-wrap(`$ iperf3 -c edge-auto -t ${T} -P ${P}   # download phase`);
-wrap('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
-
-let dnBytes = 0;
-const dnStart = performance.now();
-const dnUntil = dnStart + T*1000;
-
-const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
-
-async function dnTask(id){
-  try {
-    // Open ONE long-lived stream for the entire duration
-    const r = await fetch(`${WORKER}/d?t=${T}&slabMiB=${slabMiB}&nonce=${nonce()}`, { cache:'no-store' });
-    const reader = r.body.getReader();
-    let myBytes = 0;
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      myBytes += value.byteLength;
-      dnBytes += value.byteLength;
-
-      // Safety: stop counting if we’re past deadline (stream should close itself)
-      if (performance.now() >= dnUntil) break;
-    }
-
-    wrap(`[DBG] download stream #${id}: ${(myBytes/(1024*1024)).toFixed(2)} MiB`);
-  } catch (e) {
-    wrap(`[DBG] download stream #${id} error: ${String(e)}`);
-  }
-}
-
-await Promise.allSettled(Array.from({length:P}, (_,i) => dnTask(i+1)));
-await dnTicker;
-
-const dnMiB = toMiB(dnBytes).toFixed(2);
-const dnMb  = toMb(dnBytes, T);
-const dnGb  = dnMb/1000;
-wrap(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(dnMiB,7)}        ${pad(dnMb.toFixed(1),7)}       rcv  (P=${P})`);
-wrap(`        ➤ ISP view: ${dnMb.toFixed(1)} Mbps${dnMb>=1000?`  (${dnGb.toFixed(2)} Gbps)`:''}`);
-
-
-  /* =========================== SUMMARY ============================ */
-  wrap('+-------------------- iperf.me summary --------------------+');
-  wrap(`| Upload:   ${pad(upMiB,8)} MiB   ${pad(upMb.toFixed(1),7)} Mbit/s${upMb>=1000?`  (${upGb.toFixed(2)} Gbps)`:''} |`);
-  wrap(`| Download: ${pad(dnMiB,8)} MiB   ${pad(dnMb.toFixed(1),7)} Mbit/s${dnMb>=1000?`  (${dnGb.toFixed(2)} Gbps)`:''} |`);
-  wrap('+-----------------------------------------------------------+');
-  wrap('Units: MiB (2^20), Mbit/s (10^6). Intervals anchored to exact 1.00 s.');
-  wrap(`Tips: ?t=${T}&p=${P}&chunk=${slabMiB}  | worker: ${WORKER}`);
+  await Promise.allSettled(Array.from({length:P}, () => dnTask()));
+  await dnTicker;
+  line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${P})`);
 })();
 </script>
