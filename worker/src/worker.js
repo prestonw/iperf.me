@@ -66,7 +66,7 @@ export default {
             // Create a view that changes exactly one byte per chunk
             const chunk = base.slice(0, n);               // copy
             // Toggle one byte: XOR with 0x01 (fast & deterministic)
-            chunk[flipIndex % chunk.length] ^= 0x01;
+            if (flipIndex % 256 === 0) chunk[0] ^= 0x01;
             flipIndex++;
             controller.enqueue(chunk);
           } else {
