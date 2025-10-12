@@ -2,16 +2,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>iperf.me — MVP</title>
-<link rel="stylesheet" href="https://unpkg.com/xterm@5.3.0/css/xterm.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
 <style>
-  body { margin:0; background:#0b0e12; color:#e6edf3; font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-  header { padding:12px 16px; border-bottom:1px solid #1d2633; display:flex; gap:12px; align-items:center;}
-  .badge { background:#142033; padding:4px 8px; border-radius:6px; font-size:12px; color:#a5b4c4; }
-  #terminal { height: calc(100vh - 54px); }
-  a { color:#69b8ff; text-decoration:none; }
-  a:hover { text-decoration:underline; }
-  .sep { opacity:.5; }
+  body { margin:0; background:#0b0e12; color:#e6edf3; font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace }
+  header { padding:12px 16px; border-bottom:1px solid #1d2633; display:flex; gap:12px; align-items:center }
+  .badge { background:#142033; padding:4px 8px; border-radius:6px; font-size:12px; color:#a5b4c4 }
+  #terminal { height: calc(100vh - 54px) }
+  a { color:#69b8ff; text-decoration:none }
+  a:hover { text-decoration:underline }
+  .sep { opacity:.5 }
 </style>
+
 <header>
   <strong>iperf.me</strong>
   <span class="sep">|</span>
@@ -20,79 +21,71 @@
 </header>
 <div id="terminal"></div>
 
-<script src="https://unpkg.com/xterm@5.3.0/lib/xterm.js"></script>
+<!-- Load xterm + fit addon -->
+<script defer src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.10.0/lib/xterm-addon-fit.min.js"></script>
+
 <script>
 let WORKER = 'https://edge.iperf.me';
+try {
+  const u = new URL(location.href);
+  const o = u.searchParams.get('worker');
+  if (o) WORKER = o;
+} catch {}
 
+function start() {
+  if (!(window.Terminal && window.FitAddon)) {
+    document.getElementById('terminal').textContent =
+      'Failed to load terminal assets (CDN blocked?).';
+    return;
+  }
 
-<script src="https://unpkg.com/xterm@5.3.0/lib/xterm.js"></script>
-<script src="https://unpkg.com/xterm-addon-fit@0.10.0/lib/xterm-addon-fit.js"></script>
-<script>
-  const term = new Terminal({ theme:{ background:'#0b0e12' }, scrollback: 500 });
+  const term = new Terminal({ theme:{ background:'#0b0e12' }, scrollback:500 });
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open(document.getElementById('terminal'));
-  fitAddon.fit();                         // set cols/rows to container
+  fitAddon.fit();
+  addEventListener('resize', () => fitAddon.fit());
 
-  // keep it fitted when rotating/resizing
-  window.addEventListener('resize', () => fitAddon.fit());
-
-// Allow override via URL param (?worker=https://...)
-try {
-  const u = new URL(window.location.href);
-  const o = u.searchParams.get('worker');
-  if (o) WORKER = o;
-} catch(e){}
-
-// --- Terminal ---
-const term = new Terminal({theme:{background:'#0b0e12'}});
-term.open(document.getElementById('terminal'));
-
-function writelnWrapped(s) {
+  const writelnWrapped = (s) => {
     const max = Math.max(1, term.cols - 1);
-    for (let i = 0; i < s.length; i += max) {
-      term.writeln(s.slice(i, i + max));
+    for (let i = 0; i < s.length; i += max) term.writeln(s.slice(i, i + max));
+  };
+  const line = writelnWrapped;
+  const pad = (n,w)=>{ n=String(n); return n.length>=w?n:' '.repeat(w-n.length)+n };
+
+  async function runOnce(dir, sizeMB=10){
+    const bytes = sizeMB * 1024 * 1024;
+    const t0 = performance.now();
+    if (dir === 'upload') {
+      // zero-filled body (fast; no browser compression)
+      const payload = new Uint8Array(bytes);
+      await fetch(WORKER + '/upload', { method:'POST', body: payload });
+    } else {
+      const r = await fetch(WORKER + '/download?bytes=' + bytes);
+      await r.arrayBuffer();
     }
+    const dur = (performance.now() - t0) / 1000;
+    const mbps = (bytes*8/1e6)/dur;
+    const hdr = dir==='upload' ? 'snd' : 'rcv';
+    line(`[SUM]  0.00-${dur.toFixed(2)} sec  ${pad((bytes/1e6).toFixed(2),7)} MB  ${pad(mbps.toFixed(1),7)} Mbit/s  ${hdr}`);
   }
 
-  function line(s){ writelnWrapped(s); }
-
-function pad(n, width){ n = String(n); return n.length>=width ? n : ' '.repeat(width-n.length)+n; }
-
-async function runOnce(dir, sizeMB=10){
-  const bytes = sizeMB * 1024 * 1024;
-  const start = performance.now();
-  if(dir === 'upload'){
-    const payload = new Uint8Array(bytes);
-    for (let i = 0; i < payload.length; i += 65536) {
-      crypto.getRandomValues(payload.subarray(i, Math.min(i + 65536, payload.length)));
+  (async()=>{
+    line('$ iperf3 -c edge-auto -t 10 -P 2');
+    line('[ ID]   Interval         Transfer     Bitrate');
+    line('[SUM]   0.00-?           (calculating)');
+    try {
+      line('> Starting 10 MB upload test...');
+      await runOnce('upload', 10);
+      line('> Starting 10 MB download test...');
+      await runOnce('download', 10);
+      line('> Done.');
+    } catch (e) {
+      line('Error: ' + (e?.message || e));
     }
-    await fetch(WORKER + '/upload', { method:'POST', body: payload });
-  } else {
-    const r = await fetch(WORKER + '/download?bytes=' + bytes);
-    await r.arrayBuffer();
-  }
-  const dur = (performance.now() - start) / 1000;
-  const mbps = (bytes*8/1e6)/dur;
-  const hdr = dir==='upload' ? 'sender' : 'receiver';
-  const mb = (bytes/1e6).toFixed(2);
-  line(`[SUM]  0.00-${dur.toFixed(2)} sec  ${pad(mb,8)} MBytes  ${pad(mbps.toFixed(2),8)} Mbits/sec  ${hdr}`);
-  return {dur, mbps, bytes};
+  })();
 }
 
-(async()=>{
-  line('$ iperf3 -c edge-auto -t 10 -P 2');
-  line('[ ID]   Interval         Transfer     Bitrate        ');
-  line('[SUM]   0.00-?           (calculating)');
-  try {
-    line('> Starting 10 MB upload test...');
-    await runOnce('upload', 10);
-    line('> Starting 10 MB download test...');
-    await runOnce('download', 10);
-    line('> Done.');
-    line('iPerf.me is open-source and iPerf-inspired. Edit size via code; pro mode can add streams & WT/QUIC later.');
-  } catch (e) {
-    line('Error: ' + (e && e.message ? e.message : e));
-  }
-})();
+addEventListener('DOMContentLoaded', start);
 </script>
