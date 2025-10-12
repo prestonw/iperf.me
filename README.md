@@ -1,3 +1,5 @@
+[![Deploy to Cloudflare](https://github.com/prestonw/iperf.me/actions/workflows/deploy.yml/badge.svg)](https://github.com/prestonw/iperf.me/actions/workflows/deploy.yml)
+
 # iperf.me — Minimal MVP (Edge-friendly, iPerf-style)
 
 This is a one-hour MVP for a transparent, iPerf-inspired speed test.
