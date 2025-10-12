@@ -1,3 +1,12 @@
 name = "iperf-me-mvp"
 main = "src/worker.js"
 compatibility_date = "2024-10-01"
+
+# wrangler.toml (wrangler v3.88.0^)
+[observability]
+enabled = false
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
