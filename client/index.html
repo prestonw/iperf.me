@@ -50,7 +50,7 @@ const LIMITS = { upChunkMiBMax: 8, dnChunkMiBMax: 64 };
 const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
 /* -------------------- terminal boot -------------------- */
-function boot() {
+async function boot() {
   if (!(window.Terminal && window.FitAddon)) {
     document.getElementById('terminal').textContent = 'Failed to load terminal assets.';
     return;
