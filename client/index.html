@@ -104,34 +104,48 @@
   // =========================================================
   // 2) Reverse: iperf3 -c edge-auto -R -t T -P P
   // =========================================================
-  line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
-  line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+/* ======================== DOWNLOAD PHASE (high-throughput) ====================== */
+line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
+line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
 
-  let dnBytes = 0;
-  const dnStart = performance.now();
-  const dnUntil = dnStart + T*1000;
+let dnBytes = 0;
+const dnStart = performance.now();
+const dnUntil = dnStart + T*1000;
 
-  const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
+const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
 
-  async function dnTask() {
-    // One long stream per parallel worker; server streams for T seconds.
-    const ac = new AbortController();
-    const r = await fetch(`${WORKER}/d?t=${T}&slabMiB=${slabMiB}&nonce=${nonce()}`, {
-      cache:'no-store', signal: ac.signal
-    });
+async function dnTask(id){
+  // Request a very large payload to keep server in a tight loop; abort at deadline.
+  // 8 GiB total request size per stream (adjustable via `chunk` param if you want)
+  const bigBytes = 8 * 1024 * 1024 * 1024; // 8 GiB
+  const ac = new AbortController();
+  const kill = setTimeout(() => ac.abort('deadline'), Math.max(0, dnUntil - performance.now()));
+  try {
+    const r = await fetch(
+      `${WORKER}/download?bytes=${bigBytes}&slabMiB=${slabMiB}&nonce=${nonce()}`,
+      {
+        cache: 'no-store',
+        // avoid transparent compression that could distort throughput
+        headers: { 'Accept-Encoding': 'identity' },
+        signal: ac.signal
+      }
+    );
     const reader = r.body.getReader();
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
       dnBytes += value.byteLength;
-      if (performance.now() >= dnUntil) { ac.abort('deadline'); break; }
+      if (performance.now() >= dnUntil) break;
     }
+  } catch (e) {
+    // Expected if we aborted at deadline; ignore
+  } finally {
+    clearTimeout(kill);
   }
+}
 
-  // Important: start all streams immediately and let them run for T seconds
-  await Promise.allSettled(Array.from({length:P}, () => dnTask()));
-  await dnTicker;
+await Promise.allSettled(Array.from({length:P}, (_,i) => dnTask(i+1)));
+await dnTicker;
 
-  line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${P})`);
-})();
+line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${P})`);
 </script>
