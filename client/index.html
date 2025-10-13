@@ -104,50 +104,71 @@
   // =========================================================
   // 2) Reverse: iperf3 -c edge-auto -R -t T -P P
   // =========================================================
-/* ======================== DOWNLOAD PHASE (high-throughput) ====================== */
 line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
 line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
 
 let dnBytes = 0;
 const dnStart = performance.now();
 const dnUntil = dnStart + T*1000;
-
 const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
 
-async function dnTask(id){
-  // Request a very large payload to keep server in a tight loop; abort at deadline.
-  // 8 GiB total request size per stream (adjustable via `chunk` param if you want)
-  const bigBytes = 8 * 1024 * 1024 * 1024; // 8 GiB
-  const ac = new AbortController();
-  const kill = setTimeout(() => ac.abort('deadline'), Math.max(0, dnUntil - performance.now()));
-  try {
-    const r = await fetch(
-      `${WORKER}/download?bytes=${bigBytes}&slabMiB=${slabMiB}&nonce=${nonce()}`,
-      {
-        cache: 'no-store',
-        // avoid transparent compression that could distort throughput
-        headers: { 'Accept-Encoding': 'identity' },
-        signal: ac.signal
-      }
-    );
-    const reader = r.body.getReader();
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      dnBytes += value.byteLength;
-      if (performance.now() >= dnUntil) break;
-    }
-  } catch (e) {
-    // Expected if we aborted at deadline; ignore
-  } finally {
-    clearTimeout(kill);
+// Tunables
+const PER_REQ_BYTES = (q.get('dlbytes') ? parseInt(q.get('dlbytes'), 10)
+                                        : 256 * 1024 * 1024); // 256 MiB per request
+const PIPELINE_DEPTH = 2;  // number of in-flight requests per stream (2–3 on desktop works well)
+const slabForReq = Math.max(1, Math.min(parseInt(q.get('chunk')||'64',10), 64)); // slabMiB hint
+
+async function fetchChunk(bytes, signal) {
+  const r = await fetch(`${WORKER}/download?bytes=${bytes}&slabMiB=${slabForReq}&nonce=${nonce()}`, {
+    cache: 'no-store',
+    headers: { 'Accept-Encoding': 'identity' },
+    signal
+  });
+  const reader = r.body.getReader();
+  let got = 0;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    got += value.byteLength;
+    dnBytes += value.byteLength;
+    if (performance.now() >= dnUntil) break; // safety boundary
   }
+  return got;
 }
 
-await Promise.allSettled(Array.from({length:P}, (_,i) => dnTask(i+1)));
+async function dnStreamTask(streamId) {
+  const ac = new AbortController();
+  const inflight = new Set();
+
+  function launchOne() {
+    if (performance.now() >= dnUntil) return;
+    const p = fetchChunk(PER_REQ_BYTES, ac.signal)
+      .catch(() => 0)     // ignore errors (deadline/abort)
+      .finally(() => {
+        inflight.delete(p);
+        // immediately launch next if time remains
+        if (performance.now() < dnUntil) launchOne();
+      });
+    inflight.add(p);
+  }
+
+  // Fill the pipeline
+  for (let i = 0; i < PIPELINE_DEPTH; i++) launchOne();
+
+  // Wait until deadline then abort and drain
+  const sleep = Math.max(0, dnUntil - performance.now());
+  await new Promise(r => setTimeout(r, sleep));
+  ac.abort('deadline');
+
+  // Drain all in-flight promises
+  await Promise.allSettled([...inflight]);
+}
+
+const effectiveP = Math.min(P, 16);
+await Promise.allSettled(Array.from({ length: effectiveP }, (_,i) => dnStreamTask(i+1)));
 await dnTicker;
 
-line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${P})`);
+line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${effectiveP})`);
 })();  // <-- CLOSE the async IIFE
 </script>
 </body>
