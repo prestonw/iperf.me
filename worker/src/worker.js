@@ -98,27 +98,35 @@ if (url.pathname === '/d' && req.method === 'GET') {
       });
     }
 
-    // -------- Legacy: bounded download --------
-    if (url.pathname === '/download' && req.method === 'GET') {
-      const want = Math.min(parseInt(url.searchParams.get('bytes') || '10485760', 10), 64 * 1024 * 1024);
-      const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
-      const slab = new Uint8Array(slabMiB * 1024 * 1024);
-      for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
+    // -------- Legacy: bounded download (now with large max) --------
+if (url.pathname === '/download' && req.method === 'GET') {
+  const MAX_BYTES = 8 * 1024 * 1024 * 1024; // 8 GiB ceiling
+  const want = Math.min(parseInt(url.searchParams.get('bytes') || String(64 * 1024 * 1024), 10), MAX_BYTES);
+  const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
+  const slab = new Uint8Array(slabMiB * 1024 * 1024);
+  for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
 
-      const stream = new ReadableStream({
-        start(controller) {
-          let sent = 0;
-          while (sent < want) {
-            const n = Math.min(slab.length, want - sent);
-            controller.enqueue(slab.subarray(0, n));
-            sent += n;
-          }
-          controller.close();
-        }
-      });
-      return new Response(stream, { headers: { ...cors, 'Content-Type': 'application/octet-stream' } });
+  const stream = new ReadableStream({
+    start(controller) {
+      let sent = 0;
+      while (sent < want) {
+        const n = Math.min(slab.length, want - sent);
+        controller.enqueue(slab.subarray(0, n));
+        sent += n;
+      }
+      controller.close();
     }
+  });
 
+  return new Response(stream, {
+    headers: { 
+      ...cors, 
+      'Content-Type': 'application/octet-stream',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'X-Accel-Buffering': 'no'
+    }
+  });
+}
     // -------- Health --------
     if (url.pathname === '/health') {
       return new Response(JSON.stringify({ ok: true, ts: Date.now() }), {
