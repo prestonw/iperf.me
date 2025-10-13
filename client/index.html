@@ -148,4 +148,7 @@ await Promise.allSettled(Array.from({length:P}, (_,i) => dnTask(i+1)));
 await dnTicker;
 
 line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${P})`);
+})();  // <-- CLOSE the async IIFE
 </script>
+</body>
+</html>
