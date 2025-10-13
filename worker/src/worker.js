@@ -32,39 +32,44 @@ export default {
       });
     }
 
-    // -------- Timed high-throughput DOWNLOAD: GET /d?t=SECONDS&slabMiB=32 --------
-    if (url.pathname === '/d' && req.method === 'GET') {
-      const tSec   = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
-      const slabMiB= Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
-      const deadline = Date.now() + tSec * 1000;
+  // -------- Timed high-throughput DOWNLOAD: GET /d?t=SECONDS&slabMiB=64 --------
+if (url.pathname === '/d' && req.method === 'GET') {
+  const tSec    = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
+  const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '64', 10), 64));
+  const deadline = Date.now() + tSec * 1000;
 
-      // Prebuild one slab with a simple 0/1 flip pattern (avoids compression/caching)
-      const slab = new Uint8Array(slabMiB * 1024 * 1024);
-      for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
+  // Prebuild one slab; flip one byte using a quick nonce to avoid any caching/compression weirdness
+  const nonce = (url.searchParams.get('nonce') || '0').charCodeAt(0) & 255;
+  const slab = new Uint8Array(slabMiB * 1024 * 1024);
+  for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
+  slab[(slab.length - 1) >>> 0] = nonce ^ 1;
 
-      // Continuous enqueue loop tuned for throughput.
-      // We don't wait on backpressure; we schedule the next tick ASAP.
-      const stream = new ReadableStream({
-        start(controller) {
-          const tick = () => {
-            if (Date.now() >= deadline) { controller.close(); return; }
-            controller.enqueue(slab);
-            // Schedule next enqueue as soon as possible without blocking the event loop.
-            // setTimeout(..., 0) plays nicer with the runtime than a tight while(true).
-            setTimeout(tick, 0);
-          };
-          tick();
+  // Batch many enqueues per microtask to minimize per-call overhead
+  const BATCH = 128; // try 128–512; bigger = fewer callbacks, more throughput
+  const stream = new ReadableStream({
+    start(controller) {
+      function tick() {
+        if (Date.now() >= deadline) { controller.close(); return; }
+        for (let i = 0; i < BATCH; i++) {
+          controller.enqueue(slab);
         }
-      });
-
-      return new Response(stream, {
-        headers: {
-          ...cors,
-          'Content-Type': 'application/octet-stream',
-          'X-Accel-Buffering': 'no' // hint proxies not to buffer
-        }
-      });
+        // schedule immediately without timer clamp
+        queueMicrotask(tick);
+      }
+      tick();
     }
+  });
+
+  return new Response(stream, {
+    headers: {
+      ...cors,
+      'Content-Type': 'application/octet-stream',
+      'X-Accel-Buffering': 'no',
+      // in case proxies try to be clever:
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0'
+    }
+  });
+}
 
     // -------- Legacy: bounded upload blob --------
     if (url.pathname === '/upload' && req.method === 'POST') {
