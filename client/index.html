@@ -104,6 +104,7 @@
   // =========================================================
   // 2) Reverse: iperf3 -c edge-auto -R -t T -P P
   // =========================================================
+// ==== Reverse: iperf3 -c edge-auto -R -t T -P P (timed /d, high-throughput) ====
 line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
 line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
 
@@ -112,64 +113,57 @@ const dnStart = performance.now();
 const dnUntil = dnStart + T*1000;
 const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
 
-// Tunables
-const PER_REQ_BYTES = (q.get('dlbytes') ? parseInt(q.get('dlbytes'), 10)
-                                        : 256 * 1024 * 1024); // 256 MiB per request
-const PIPELINE_DEPTH = 2;  // number of in-flight requests per stream (2–3 on desktop works well)
-const slabForReq = Math.max(1, Math.min(parseInt(q.get('chunk')||'64',10), 64)); // slabMiB hint
-
-async function fetchChunk(bytes, signal) {
-  const r = await fetch(`${WORKER}/download?bytes=${bytes}&slabMiB=${slabForReq}&nonce=${nonce()}`, {
+async function timedStream(signal) {
+  const r = await fetch(`${WORKER}/d?t=${T}&slabMiB=${slabMiB}&nonce=${nonce()}`, {
     cache: 'no-store',
-    headers: { 'Accept-Encoding': 'identity' },
+    headers: { 'Accept-Encoding': 'identity' }, // avoid gzip
     signal
   });
   const reader = r.body.getReader();
-  let got = 0;
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
-    got += value.byteLength;
     dnBytes += value.byteLength;
-    if (performance.now() >= dnUntil) break; // safety boundary
+    if (performance.now() >= dnUntil) break;
   }
-  return got;
 }
 
-async function dnStreamTask(streamId) {
-  const ac = new AbortController();
-  const inflight = new Set();
+async function runTimedStreams(initialP) {
+  const controllers = [];
+  const tasks = new Set();
 
-  function launchOne() {
-    if (performance.now() >= dnUntil) return;
-    const p = fetchChunk(PER_REQ_BYTES, ac.signal)
-      .catch(() => 0)     // ignore errors (deadline/abort)
-      .finally(() => {
-        inflight.delete(p);
-        // immediately launch next if time remains
-        if (performance.now() < dnUntil) launchOne();
-      });
-    inflight.add(p);
+  function startOne() {
+    const ac = new AbortController();
+    controllers.push(ac);
+    const p = timedStream(ac.signal).catch(()=>{}).finally(()=>tasks.delete(p));
+    tasks.add(p);
   }
 
-  // Fill the pipeline
-  for (let i = 0; i < PIPELINE_DEPTH; i++) launchOne();
+  // start with P
+  for (let i = 0; i < initialP; i++) startOne();
 
-  // Wait until deadline then abort and drain
-  const sleep = Math.max(0, dnUntil - performance.now());
-  await new Promise(r => setTimeout(r, sleep));
-  ac.abort('deadline');
+  // adapt after 2 seconds if needed (desktop only)
+  const canBoost = !isMobile && initialP < 16;
+  if (canBoost) {
+    await new Promise(r => setTimeout(r, Math.max(0, (dnStart + 2000) - performance.now())));
+    const mbpsSoFar = toMb(dnBytes, Math.max(2, (performance.now() - dnStart)/1000));
+    if (mbpsSoFar < 800) {        // aim for gigabit+
+      const extra = Math.min(16 - initialP, 4); // add up to +4 streams
+      for (let i = 0; i < extra; i++) startOne();
+    }
+  }
 
-  // Drain all in-flight promises
-  await Promise.allSettled([...inflight]);
+  // wait to deadline, then abort all
+  await new Promise(r => setTimeout(r, Math.max(0, dnUntil - performance.now())));
+  controllers.forEach(c => c.abort('deadline'));
+  await Promise.allSettled([...tasks]);
 }
 
-const effectiveP = Math.min(P, 16);
-await Promise.allSettled(Array.from({ length: effectiveP }, (_,i) => dnStreamTask(i+1)));
+await Promise.allSettled([ runTimedStreams(P) ]);
 await dnTicker;
 
-line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${effectiveP})`);
-})();  // <-- CLOSE the async IIFE
+line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${Math.min(P,16)})`);
+})();
 </script>
 </body>
 </html>
