@@ -32,31 +32,57 @@ export default {
       });
     }
 
-// -------- Timed ultra-throughput DOWNLOAD: GET /d?t=SECONDS&slabMiB=64 --------
+// -------- Timed high-throughput DOWNLOAD: GET /d?t=SECONDS&slabMiB=32&batch=128 --------
 if (url.pathname === '/d' && req.method === 'GET') {
-  const tSec     = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
-  const slabMiB  = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '64', 10), 64));
-  const deadline = Date.now() + tSec * 1000;
+  try {
+    const tSec     = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
+    const slabMiB  = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
+    const BATCH    = Math.max(16, Math.min(parseInt(url.searchParams.get('batch') || '128', 10), 1024));
+    const deadline = Date.now() + tSec * 1000;
 
-  // Build one large slab; randomize one byte to defeat compression/caching heuristics
-  const nonce = (url.searchParams.get('nonce') || '0').charCodeAt(0) & 255;
-  const slab  = new Uint8Array(slabMiB * 1024 * 1024);
-  for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
-  slab[slab.length - 1] = slab[slab.length - 1] ^ nonce;
+    // Build slab; flip one byte to defeat compression/caching heuristics
+    const nonce = (url.searchParams.get('nonce') || '0').charCodeAt(0) & 255;
+    const slab  = new Uint8Array(slabMiB * 1024 * 1024);
+    for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
+    slab[slab.length - 1] ^= nonce;
 
-  // Batch many enqueues per microtask to minimize JS overhead (tune 128–512)
-  const BATCH = 256;
-
-  const stream = new ReadableStream({
-    start(controller) {
-      function tick() {
-        if (Date.now() >= deadline) { controller.close(); return; }
-        for (let i = 0; i < BATCH; i++) controller.enqueue(slab);
-        queueMicrotask(tick); // avoids timer clamping and yields very briefly
+    const stream = new ReadableStream({
+      start(controller) {
+        let iter = 0;
+        function tick() {
+          if (Date.now() >= deadline) { controller.close(); return; }
+          for (let i = 0; i < BATCH; i++) controller.enqueue(slab);
+          // Yield lightly every ~8 ticks to avoid CPU watchdogs/503 under load
+          if ((++iter % 8) === 0) setTimeout(tick, 0);
+          else queueMicrotask(tick);
+        }
+        tick();
       }
-      tick();
-    }
-  });
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        'Access-Control-Expose-Headers': '*',
+        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0, no-transform',
+        'X-Accel-Buffering': 'no',
+        'Content-Type': 'application/octet-stream'
+      }
+    });
+  } catch (e) {
+    return new Response(JSON.stringify({ ok:false, error: String(e) }), {
+      status: 500,
+      headers: {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+      }
+    });
+  }
+}
 
   return new Response(stream, {
     headers: {

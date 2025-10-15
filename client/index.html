@@ -1,4 +1,5 @@
 <!doctype html>
+<html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>iperf.me — MVP</title>
@@ -19,6 +20,7 @@
   #terminal{height:calc(100vh - 46px)}
 </style>
 
+<body>
 <header>
   <strong>iperf.me</strong><span class="sep">|</span>
   <span class="badge">edge-friendly</span>
@@ -33,17 +35,22 @@
 <script>
 (async function(){
   // ---------- params ----------
-  let WORKER = 'https://edge.iperf.me';
-  try { const u = new URL(location.href); WORKER = u.searchParams.get('worker') || WORKER; } catch {}
-  const q       = new URLSearchParams(location.search);
-  const T       = Math.max(1, Math.min(parseInt(q.get('t')||'10',10), 60));      // seconds
-  const P       = Math.max(1, Math.min(parseInt(q.get('p')||'4',10), 8));        // parallel streams (reverse)
-  const slabMiB = Math.max(1, Math.min(parseInt(q.get('chunk')||'32',10), 64));  // server chunk size for download
+  const q = new URLSearchParams(location.search);
+  const T       = Math.max(1, Math.min(parseInt(q.get('t')||'10',10), 60));     // seconds
+  const P       = Math.max(1, Math.min(parseInt(q.get('p')||'4',10), 16));     // parallel streams (reverse)
+  const slabMiB = Math.max(1, Math.min(parseInt(q.get('chunk')||'32',10), 64)); // server slab size
+  const batch   = Math.max(16, Math.min(parseInt(q.get('batch')||'128',10),1024)); // server batch hint
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  // IMPORTANT: if routing to edge.iperf.me is flaky, change DEFAULT_WORKER to your workers.dev
+  const DEFAULT_WORKER = 'https://edge.iperf.me';
+  let WORKER = DEFAULT_WORKER;
+  try { const u = new URL(location.href); WORKER = u.searchParams.get('worker') || WORKER; } catch {}
 
   // ---------- terminal ----------
   await new Promise(r => addEventListener('DOMContentLoaded', r, { once:true }));
   if (!(window.Terminal && window.FitAddon)) { document.getElementById('terminal').textContent='terminal load error'; return; }
+
   const term = new Terminal({ theme:{ background:'#0b0e12' }, fontSize:12, lineHeight:1.15, scrollback:2000, convertEol:true });
   const fit  = new FitAddon.FitAddon();
   term.loadAddon(fit); term.open(document.getElementById('terminal')); fit.fit();
@@ -93,7 +100,9 @@
           headers:{ 'Content-Type':'application/octet-stream' }
         });
         if (res.ok) upBytes += upBlob.size;
-      } catch {}
+      } catch {
+        // swallow transient errors
+      }
     }
   })();
 
@@ -102,67 +111,77 @@
   line('');
 
   // =========================================================
-  // 2) Reverse: iperf3 -c edge-auto -R -t T -P P
+  // 2) Reverse: iperf3 -c edge-auto -R -t T -P P  (timed /d + early-fail replacement)
   // =========================================================
-// ==== Reverse: iperf3 -c edge-auto -R -t T -P P (timed /d, high-throughput) ====
-line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
-line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+  line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
+  line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
 
-let dnBytes = 0;
-const dnStart = performance.now();
-const dnUntil = dnStart + T*1000;
-const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
+  let dnBytes = 0;
+  const dnStart = performance.now();
+  const dnUntil = dnStart + T*1000;
+  const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
 
-async function timedStream(signal) {
-  const r = await fetch(`${WORKER}/d?t=${T}&slabMiB=${slabMiB}&nonce=${nonce()}`, {
-    cache: 'no-store',
-    headers: { 'Accept-Encoding': 'identity' }, // avoid gzip
-    signal
-  });
-  const reader = r.body.getReader();
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    dnBytes += value.byteLength;
-    if (performance.now() >= dnUntil) break;
-  }
-}
-
-async function runTimedStreams(initialP) {
-  const controllers = [];
-  const tasks = new Set();
-
-  function startOne() {
-    const ac = new AbortController();
-    controllers.push(ac);
-    const p = timedStream(ac.signal).catch(()=>{}).finally(()=>tasks.delete(p));
-    tasks.add(p);
-  }
-
-  // start with P
-  for (let i = 0; i < initialP; i++) startOne();
-
-  // adapt after 2 seconds if needed (desktop only)
-  const canBoost = !isMobile && initialP < 16;
-  if (canBoost) {
-    await new Promise(r => setTimeout(r, Math.max(0, (dnStart + 2000) - performance.now())));
-    const mbpsSoFar = toMb(dnBytes, Math.max(2, (performance.now() - dnStart)/1000));
-    if (mbpsSoFar < 800) {        // aim for gigabit+
-      const extra = Math.min(16 - initialP, 4); // add up to +4 streams
-      for (let i = 0; i < extra; i++) startOne();
+  async function timedStream(signal) {
+    const url = `${WORKER}/d?t=${T}&slabMiB=${slabMiB}&batch=${batch}&nonce=${nonce()}`;
+    const r = await fetch(url, {
+      cache: 'no-store',
+      headers: { 'Accept-Encoding': 'identity' },
+      signal
+    });
+    if (!r.ok || !r.body) throw new Error('bad response');
+    const reader = r.body.getReader();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      dnBytes += value.byteLength;
+      if (performance.now() >= dnUntil) break;
     }
   }
 
-  // wait to deadline, then abort all
-  await new Promise(r => setTimeout(r, Math.max(0, dnUntil - performance.now())));
-  controllers.forEach(c => c.abort('deadline'));
-  await Promise.allSettled([...tasks]);
-}
+  async function runTimedStreams(initialP) {
+    const controllers = [];
+    const tasks = new Set();
 
-await Promise.allSettled([ runTimedStreams(P) ]);
-await dnTicker;
+    function startOne() {
+      const ac = new AbortController();
+      controllers.push(ac);
+      const startedAt = performance.now();
+      const p = timedStream(ac.signal).catch(() => {
+        // Early replacement if it failed within first 1s
+        if (performance.now() - startedAt < 1000 && performance.now() < dnUntil) {
+          const ac2 = new AbortController();
+          controllers.push(ac2);
+          const p2 = timedStream(ac2.signal).catch(()=>{}).finally(()=>tasks.delete(p2));
+          tasks.add(p2);
+        }
+      }).finally(()=>tasks.delete(p));
+      tasks.add(p);
+    }
 
-line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${Math.min(P,16)})`);
+    // start with P
+    for (let i = 0; i < initialP; i++) startOne();
+
+    // adapt after 2 seconds if needed (desktop only)
+    const canBoost = !isMobile && initialP < 16;
+    if (canBoost) {
+      await new Promise(r => setTimeout(r, Math.max(0, (dnStart + 2000) - performance.now())));
+      const mbpsSoFar = toMb(dnBytes, Math.max(2, (performance.now() - dnStart)/1000));
+      if (mbpsSoFar < 800) {
+        const extra = Math.min(16 - initialP, 4);
+        for (let i = 0; i < extra; i++) startOne();
+      }
+    }
+
+    // wait to deadline, then abort all
+    await new Promise(r => setTimeout(r, Math.max(0, dnUntil - performance.now())));
+    controllers.forEach(c => c.abort('deadline'));
+    await Promise.allSettled([...tasks]);
+  }
+
+  await Promise.allSettled([ runTimedStreams(P) ]);
+  await dnTicker;
+
+  line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${Math.min(P,16)})`);
 })();
 </script>
 </body>
