@@ -2,21 +2,26 @@ export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
 
+    // CORS for everything (including errors)
     const cors = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
-      'Cache-Control': 'no-store, no-transform',
+      'Access-Control-Expose-Headers': '*',
+      'Cache-Control': 'no-store, no-transform'
     };
-    if (req.method === 'OPTIONS') return new Response(null, { headers: cors });
 
-    // -------- Timed streaming UPLOAD (client sends data): POST /u?t=SECONDS --------
+    if (req.method === 'OPTIONS') {
+      return new Response(null, { headers: cors });
+    }
+
+    // ------------------ Timed streaming UPLOAD: POST /u?t=SECONDS ------------------
     if (url.pathname === '/u' && req.method === 'POST') {
       const tSec = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
       let bytes = 0;
       const reader = req.body?.getReader?.();
       if (!reader) {
-        return new Response(JSON.stringify({ error: 'no body' }), {
+        return new Response(JSON.stringify({ ok:false, error:'no body' }), {
           status: 400, headers: { 'Content-Type': 'application/json', ...cors }
         });
       }
@@ -26,81 +31,75 @@ export default {
           if (done) break;
           bytes += value.byteLength;
         }
-      } catch {}
-      return new Response(JSON.stringify({ ok: true, bytes, seconds: tSec }), {
+      } catch (e) {
+        return new Response(JSON.stringify({ ok:false, error: String(e) }), {
+          status: 499, headers: { 'Content-Type': 'application/json', ...cors }
+        });
+      }
+      return new Response(JSON.stringify({ ok:true, bytes, seconds:tSec }), {
         headers: { 'Content-Type': 'application/json', ...cors }
       });
     }
 
-// -------- Timed high-throughput DOWNLOAD: GET /d?t=SECONDS&slabMiB=32&batch=128 --------
-if (url.pathname === '/d' && req.method === 'GET') {
-  try {
-    const tSec     = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
-    const slabMiB  = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
-    const BATCH    = Math.max(16, Math.min(parseInt(url.searchParams.get('batch') || '128', 10), 1024));
-    const deadline = Date.now() + tSec * 1000;
+    // ---- Timed high-throughput DOWNLOAD: GET /d?t=SECONDS&slabMiB=32&batch=128 ----
+    if (url.pathname === '/d' && req.method === 'GET') {
+      try {
+        const tSec     = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
+        const slabMiB  = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
+        const BATCH    = Math.max(16, Math.min(parseInt(url.searchParams.get('batch') || '128', 10), 1024));
+        const deadline = Date.now() + tSec * 1000;
 
-    // Build slab; flip one byte to defeat compression/caching heuristics
-    const nonce = (url.searchParams.get('nonce') || '0').charCodeAt(0) & 255;
-    const slab  = new Uint8Array(slabMiB * 1024 * 1024);
-    for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
-    slab[slab.length - 1] ^= nonce;
+        // Build slab; flip last byte using a nonce to defeat caches/compression
+        const nonce = (url.searchParams.get('nonce') || '0').charCodeAt(0) & 255;
+        const slab  = new Uint8Array(slabMiB * 1024 * 1024);
+        for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
+        slab[slab.length - 1] ^= nonce;
 
-    const stream = new ReadableStream({
-      start(controller) {
-        let iter = 0;
-        function tick() {
-          if (Date.now() >= deadline) { controller.close(); return; }
-          for (let i = 0; i < BATCH; i++) controller.enqueue(slab);
-          // Yield lightly every ~8 ticks to avoid CPU watchdogs/503 under load
-          if ((++iter % 8) === 0) setTimeout(tick, 0);
-          else queueMicrotask(tick);
-        }
-        tick();
+        const stream = new ReadableStream({
+          start(controller) {
+            let iter = 0;
+            function tick() {
+              if (Date.now() >= deadline) { controller.close(); return; }
+
+              // Push BATCH slabs per tick
+              for (let i = 0; i < BATCH; i++) {
+                controller.enqueue(slab);
+                // Respect backpressure: if desiredSize dips negative, yield immediately
+                if ((controller.desiredSize ?? 0) <= 0) break;
+              }
+
+              // Yield periodically to avoid CPU watchdog 503
+              if ((++iter % 8) === 0) setTimeout(tick, 0);
+              else queueMicrotask(tick);
+            }
+            tick();
+          }
+        });
+
+        return new Response(stream, {
+          headers: {
+            ...cors,
+            'Content-Type': 'application/octet-stream',
+            'X-Accel-Buffering': 'no',
+            // make sure intermediaries don’t buffer/compress
+            'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0, no-transform'
+          }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok:false, error:String(e) }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json', ...cors }
+        });
       }
-    });
-
-    return new Response(stream, {
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-        'Access-Control-Expose-Headers': '*',
-        'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0, no-transform',
-        'X-Accel-Buffering': 'no',
-        'Content-Type': 'application/octet-stream'
-      }
-    });
-  } catch (e) {
-    return new Response(JSON.stringify({ ok:false, error: String(e) }), {
-      status: 500,
-      headers: {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-      }
-    });
-  }
-}
-
-  return new Response(stream, {
-    headers: {
-      ...cors,
-      'Content-Type': 'application/octet-stream',
-      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0, no-transform',
-      'X-Accel-Buffering': 'no'
     }
-  });
-}
 
-    // -------- Legacy: bounded upload blob --------
+    // ------------------ Legacy burst UPLOAD: POST /upload (10 MiB cap) ------------------
     if (url.pathname === '/upload' && req.method === 'POST') {
-      const MAX = 10 * 1024 * 1024; // 10 MiB per request (burst mode)
+      const MAX = 10 * 1024 * 1024; // 10 MiB per request
       let received = 0;
       const reader = req.body?.getReader?.();
       if (!reader) {
-        return new Response(JSON.stringify({ error: 'no body' }), {
+        return new Response(JSON.stringify({ ok:false, error:'no body' }), {
           status: 400, headers: { 'Content-Type': 'application/json', ...cors }
         });
       }
@@ -110,53 +109,64 @@ if (url.pathname === '/d' && req.method === 'GET') {
           if (done) break;
           received += value.byteLength;
           if (received > MAX) {
-            return new Response(JSON.stringify({ error: 'payload too large', bytes: received }), {
+            return new Response(JSON.stringify({ ok:false, error:'payload too large', bytes: received }), {
               status: 413, headers: { 'Content-Type': 'application/json', ...cors }
             });
           }
         }
-      } catch {}
-      return new Response(JSON.stringify({ ok: true, bytes: received }), {
+      } catch (e) {
+        return new Response(JSON.stringify({ ok:false, error:String(e) }), {
+          status: 499, headers: { 'Content-Type': 'application/json', ...cors }
+        });
+      }
+      return new Response(JSON.stringify({ ok:true, bytes: received }), {
         headers: { 'Content-Type': 'application/json', ...cors }
       });
     }
 
-    // -------- Legacy: bounded download (now with large max) --------
-if (url.pathname === '/download' && req.method === 'GET') {
-  const MAX_BYTES = 8 * 1024 * 1024 * 1024; // 8 GiB ceiling
-  const want = Math.min(parseInt(url.searchParams.get('bytes') || String(64 * 1024 * 1024), 10), MAX_BYTES);
-  const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
-  const slab = new Uint8Array(slabMiB * 1024 * 1024);
-  for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
+    // ---- Legacy bounded DOWNLOAD: GET /download?bytes=...&slabMiB=32 (8 GiB ceiling) ----
+    if (url.pathname === '/download' && req.method === 'GET') {
+      const MAX_BYTES = 8 * 1024 * 1024 * 1024; // 8 GiB ceiling
+      const want    = Math.min(parseInt(url.searchParams.get('bytes') || String(64 * 1024 * 1024), 10), MAX_BYTES);
+      const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
+      const slab    = new Uint8Array(slabMiB * 1024 * 1024);
+      for (let i = 0; i < slab.length; i++) slab[i] = (i & 1) ? 1 : 0;
 
-  const stream = new ReadableStream({
-    start(controller) {
-      let sent = 0;
-      while (sent < want) {
-        const n = Math.min(slab.length, want - sent);
-        controller.enqueue(slab.subarray(0, n));
-        sent += n;
-      }
-      controller.close();
-    }
-  });
+      const stream = new ReadableStream({
+        start(controller) {
+          let sent = 0;
+          // push in chunks; yield to let CF dispatch I/O
+          function push() {
+            while (sent < want) {
+              const n = Math.min(slab.length, want - sent);
+              controller.enqueue(slab.subarray(0, n));
+              sent += n;
+              if ((controller.desiredSize ?? 0) <= 0) { setTimeout(push, 0); return; }
+            }
+            controller.close();
+          }
+          push();
+        }
+      });
 
-  return new Response(stream, {
-    headers: { 
-      ...cors, 
-      'Content-Type': 'application/octet-stream',
-      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
-      'X-Accel-Buffering': 'no'
+      return new Response(stream, {
+        headers: {
+          ...cors,
+          'Content-Type': 'application/octet-stream',
+          'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0, no-transform',
+          'X-Accel-Buffering': 'no'
+        }
+      });
     }
-  });
-}
-    // -------- Health --------
+
+    // --------------------------------- Health ---------------------------------
     if (url.pathname === '/health') {
       return new Response(JSON.stringify({ ok: true, ts: Date.now() }), {
         headers: { 'Content-Type': 'application/json', ...cors }
       });
     }
 
+    // Default
     return new Response('iperf.me worker mvp', { headers: cors });
   }
 };
