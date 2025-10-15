@@ -1,11 +1,20 @@
 name: Deploy to Cloudflare
+
 on:
   push:
     branches: [ main ]
+  workflow_dispatch:
+
+concurrency:
+  group: cloudflare-deploy
+  cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
     steps:
       - uses: actions/checkout@v4
 
@@ -13,15 +22,31 @@ jobs:
       - name: Show repo layout
         run: |
           node -v; npm -v
-          ls -la; ls -la worker
+          echo "---- repo root ----"
+          ls -la
+          echo "---- worker ----"
+          ls -la worker || true
           echo "---- wrangler.toml ----"
           cat worker/wrangler.toml
 
       - name: Publish Worker
+        id: wrangler
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CF_API_TOKEN }}
           accountId: ${{ secrets.CF_ACCOUNT_ID }}
-          wranglerVersion: '4.42.0'   # keep or remove; both fine
+          wranglerVersion: '4.42.0'
           workingDirectory: worker
-          command: deploy            # <-- was 'publish --verbose'
+          command: deploy
+
+      - name: Show Wrangler logs on failure
+        if: failure()
+        run: |
+          LOGDIR="$HOME/.config/.wrangler/logs"
+          echo "---- Wrangler logs ----"
+          if [ -d "$LOGDIR" ]; then
+            ls -la "$LOGDIR" || true
+            tail -n +1 "$LOGDIR"/*.log || true
+          else
+            echo "No Wrangler log directory found."
+          fi
