@@ -1,0 +1,18 @@
+{
+    "name": "iperf.me",
+    "private": true,
+    "type": "module",
+    "scripts": {
+      "test": "vitest run",
+      "test:watch": "vitest",
+      "test:worker": "vitest run worker/test/*.test.mjs",
+      "test:client": "vitest run client/test/*.test.mjs"
+    },
+    "devDependencies": {
+      "@cloudflare/workers-types": "^4.20241022.0",
+      "miniflare": "^3.20241022.2",
+      "undici": "^6.19.8",
+      "vitest": "^2.1.3"
+    }
+  }
+  
