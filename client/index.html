@@ -34,31 +34,30 @@
 
 <script>
 (async function(){
-  // ---------- params ----------
   const q = new URLSearchParams(location.search);
-  const T       = Math.max(1, Math.min(parseInt(q.get('t')||'10',10), 60));     // seconds
-  const P       = Math.max(1, Math.min(parseInt(q.get('p')||'4',10), 16));     // parallel streams (reverse)
-  const slabMiB = Math.max(1, Math.min(parseInt(q.get('chunk')||'32',10), 64)); // server slab size
-  const batch   = Math.max(16, Math.min(parseInt(q.get('batch')||'128',10),1024)); // server batch hint
+  const T       = Math.max(1, Math.min(parseInt(q.get('t')||'10',10), 60));
+  const Pwant   = Math.max(1, Math.min(parseInt(q.get('p')||'4',10), 16));
+  const slabMiB = Math.max(1, Math.min(parseInt(q.get('chunk')||'32',10), 64));
+  const batch   = Math.max(8, Math.min(parseInt(q.get('batch')||'128',10), 1024));
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
-  // IMPORTANT: if routing to edge.iperf.me is flaky, change DEFAULT_WORKER to your workers.dev
-  const DEFAULT_WORKER = 'https://edge.iperf.me';
+  // Default to workers.dev; override with ?worker=
+  const DEFAULT_WORKER = 'https://iperf-me-mvp.iperf.workers.dev';
   let WORKER = DEFAULT_WORKER;
   try { const u = new URL(location.href); WORKER = u.searchParams.get('worker') || WORKER; } catch {}
 
-  // ---------- terminal ----------
   await new Promise(r => addEventListener('DOMContentLoaded', r, { once:true }));
-  if (!(window.Terminal && window.FitAddon)) { document.getElementById('terminal').textContent='terminal load error'; return; }
+  if (!(window.Terminal && window.FitAddon)) { document.getElementById('terminal').textContent = 'terminal load error'; return; }
 
   const term = new Terminal({ theme:{ background:'#0b0e12' }, fontSize:12, lineHeight:1.15, scrollback:2000, convertEol:true });
   const fit  = new FitAddon.FitAddon();
   term.loadAddon(fit); term.open(document.getElementById('terminal')); fit.fit();
   addEventListener('resize', () => fit.fit());
+
   const line = s => { const max=Math.max(1,term.cols-1); for(let i=0;i<s.length;i+=max) term.writeln(s.slice(i,i+max)); };
   const pad  = (v,w)=> String(v).padStart(w,' ');
-  const toMiB= b => b/(1024*1024);                       // MiB (2^20)
-  const toMb = (b,s)=> (b*8/1e6)/Math.max(s,1e-6);       // Mbit/s (10^6)
+  const toMiB= b => b/(1024*1024);
+  const toMb = (b,s)=> (b*8/1e6)/Math.max(s,1e-6);
   const nonce= ()=> Math.random().toString(36).slice(2);
 
   async function printAnchored(getTotalBytes, dir, seconds, t0){
@@ -76,44 +75,49 @@
     }
   }
 
-  // =========================================================
-  // 1) Upload: iperf3 -c edge-auto -t T -P 1
-  // =========================================================
+  // --------------------- Upload phase (capped 100 MiB total) ---------------------
   line(`$ iperf3 -c edge-auto -t ${T} -P 1`);
   line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
 
-  const upChunk = 1024*1024*(isMobile ? 2 : 4); // 2 MiB mobile, 4 MiB desktop
-  const upBuf   = new Uint8Array(upChunk);
-  const upBlob  = new Blob([upBuf], { type:'application/octet-stream' });
-
+  const UP_TOTAL_CAP = 100 * 1024 * 1024; // 100 MiB
+  const upChunkSize  = 1024*1024*(isMobile ? 2 : 4); // 2 MiB mobile, 4 MiB desktop
+  const baseBuf      = new Uint8Array(upChunkSize);
   let upBytes = 0;
+
   const upStart = performance.now();
   const upUntil = upStart + T*1000;
-
   const upTicker = printAnchored(()=>upBytes, 'snd', T, upStart);
 
   (async () => {
-    while (performance.now() < upUntil) {
+    while (performance.now() < upUntil && upBytes < UP_TOTAL_CAP) {
+      // slice last chunk if needed to not exceed 100 MiB
+      const room = UP_TOTAL_CAP - upBytes;
+      const sendSize = Math.min(room, upChunkSize);
+      const body = new Blob([sendSize === upChunkSize ? baseBuf : baseBuf.subarray(0, sendSize)],
+                            { type:'application/octet-stream' });
+
       try {
         const res = await fetch(`${WORKER}/upload?nonce=${nonce()}`, {
-          method:'POST', body: upBlob, cache:'no-store',
+          method:'POST', body, cache:'no-store',
           headers:{ 'Content-Type':'application/octet-stream' }
         });
-        if (res.ok) upBytes += upBlob.size;
+        if (res.ok) upBytes += body.size;
       } catch {
         // swallow transient errors
       }
+
+      // if we hit the cap exactly, stop now
+      if (upBytes >= UP_TOTAL_CAP) break;
     }
   })();
 
   await upTicker;
-  line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(upBytes).toFixed(2),7)}        ${pad(toMb(upBytes,T).toFixed(1),7)}       snd  (P=1)`);
+  const upCappedNote = upBytes >= UP_TOTAL_CAP ? ' (capped at 100 MiB)' : '';
+  line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(upBytes).toFixed(2),7)}        ${pad(toMb(upBytes, Math.min(T, (performance.now()-upStart)/1000)).toFixed(1),7)}       snd  (P=1)${upCappedNote}`);
   line('');
 
-  // =========================================================
-  // 2) Reverse: iperf3 -c edge-auto -R -t T -P P  (timed /d + early-fail replacement)
-  // =========================================================
-  line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
+  // --------------------- Reverse phase (download) ---------------------
+  line(`$ iperf3 -c edge-auto -R -t ${T} -P ${Pwant}`);
   line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
 
   let dnBytes = 0;
@@ -121,14 +125,10 @@
   const dnUntil = dnStart + T*1000;
   const dnTicker = printAnchored(()=>dnBytes, 'rcv', T, dnStart);
 
-  async function timedStream(signal) {
+  async function oneStream(signal) {
     const url = `${WORKER}/d?t=${T}&slabMiB=${slabMiB}&batch=${batch}&nonce=${nonce()}`;
-    const r = await fetch(url, {
-      cache: 'no-store',
-      headers: { 'Accept-Encoding': 'identity' },
-      signal
-    });
-    if (!r.ok || !r.body) throw new Error('bad response');
+    const r = await fetch(url, { cache:'no-store', headers:{ 'Accept-Encoding':'identity' }, signal });
+    if (!r.ok || !r.body) throw new Error(`bad response ${r.status}`);
     const reader = r.body.getReader();
     while (true) {
       const { value, done } = await reader.read();
@@ -138,50 +138,49 @@
     }
   }
 
-  async function runTimedStreams(initialP) {
-    const controllers = [];
+  async function runStreams(Pinit) {
+    let P = Pinit;
+    const controllers = new Set();
     const tasks = new Set();
 
     function startOne() {
       const ac = new AbortController();
-      controllers.push(ac);
+      controllers.add(ac);
       const startedAt = performance.now();
-      const p = timedStream(ac.signal).catch(() => {
-        // Early replacement if it failed within first 1s
-        if (performance.now() - startedAt < 1000 && performance.now() < dnUntil) {
+      const p = oneStream(ac.signal).catch((e) => {
+        // Early failure → replace once and back off concurrency
+        if (performance.now() - startedAt < 1000) {
+          line(`[DBG] stream early fail: ${e?.message || e}`);
+          if (P > 1) P = Math.max(1, Math.floor(P/2));
           const ac2 = new AbortController();
-          controllers.push(ac2);
-          const p2 = timedStream(ac2.signal).catch(()=>{}).finally(()=>tasks.delete(p2));
+          controllers.add(ac2);
+          const p2 = oneStream(ac2.signal).catch(()=>{}).finally(()=>{ tasks.delete(p2); controllers.delete(ac2); });
           tasks.add(p2);
         }
-      }).finally(()=>tasks.delete(p));
+      }).finally(() => { tasks.delete(p); controllers.delete(ac); });
       tasks.add(p);
     }
 
-    // start with P
-    for (let i = 0; i < initialP; i++) startOne();
+    for (let i=0;i<P;i++) startOne();
 
-    // adapt after 2 seconds if needed (desktop only)
-    const canBoost = !isMobile && initialP < 16;
-    if (canBoost) {
+    // modest desktop boost after 2s if slow
+    if (!isMobile && P < 16) {
       await new Promise(r => setTimeout(r, Math.max(0, (dnStart + 2000) - performance.now())));
-      const mbpsSoFar = toMb(dnBytes, Math.max(2, (performance.now() - dnStart)/1000));
-      if (mbpsSoFar < 800) {
-        const extra = Math.min(16 - initialP, 4);
-        for (let i = 0; i < extra; i++) startOne();
+      const mbps2s = toMb(dnBytes, Math.max(2, (performance.now() - dnStart)/1000));
+      if (mbps2s < 800) {
+        const extra = Math.min(16 - P, 4);
+        for (let i=0;i<extra;i++) startOne();
       }
     }
 
-    // wait to deadline, then abort all
     await new Promise(r => setTimeout(r, Math.max(0, dnUntil - performance.now())));
     controllers.forEach(c => c.abort('deadline'));
     await Promise.allSettled([...tasks]);
   }
 
-  await Promise.allSettled([ runTimedStreams(P) ]);
+  await runStreams(Pwant);
   await dnTicker;
-
-  line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${Math.min(P,16)})`);
+  line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnBytes).toFixed(2),7)}        ${pad(toMb(dnBytes,T).toFixed(1),7)}       rcv  (P=${Math.min(Pwant,16)})`);
 })();
 </script>
 </body>
