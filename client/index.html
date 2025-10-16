@@ -48,8 +48,8 @@
     const paramWorker = (() => { try { return new URL(location.href).searchParams.get('worker') || ''; } catch { return ''; } })();
     let WORKER = paramWorker || '';                                   // '' means same-origin (/api/…)
     const FALLBACK = 'https://iperf-me-mvp.iperf.workers.dev';        // workers.dev fallback
-
-    export async function fetchWithFallback(url, init = {}, fallbacks = ['https://iperf-me-mvp.iperf.workers.dev']) {
+  
+    async function fetchWithFallback(pathAndQuery, init) {
       // pathAndQuery must start with "/"
       const tryOnce = async (base) => fetch(`${base}${pathAndQuery}`, init);
       try {
