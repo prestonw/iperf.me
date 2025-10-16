@@ -33,166 +33,182 @@
 <script defer src="vendor/xterm/xterm-addon-fit.js"></script>
 
 <script>
-(async function(){
-  // ---------- params ----------
-  const q = new URLSearchParams(location.search);
-  const T        = Math.max(1, Math.min(parseInt(q.get('t')||'10',10), 60));     // printed seconds
-  const warm     = Math.max(0, Math.min(parseInt(q.get('warm')||'3',10), 10));   // warmup seconds ignored
-  const P        = Math.max(1, Math.min(parseInt(q.get('p')||'4',10), 16));      // reverse parallel
-  const slabMiB  = Math.max(1, Math.min(parseInt(q.get('chunk')||'32',10), 64)); // server slab size
-  const batch    = Math.max(8, Math.min(parseInt(q.get('batch')||'128',10),1024));
-  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  (async function(){
+    // ---------- params ----------
+    const q = new URLSearchParams(location.search);
+    const T        = Math.max(1, Math.min(parseInt(q.get('t')||'10',10), 60));     // printed seconds
+    const warm     = Math.max(0, Math.min(parseInt(q.get('warm')||'3',10), 10));   // warmup seconds ignored
+    const P        = Math.max(1, Math.min(parseInt(q.get('p')||'4',10), 16));      // reverse parallel
+    const slabMiB  = Math.max(1, Math.min(parseInt(q.get('chunk')||'32',10), 64)); // server slab size
+    const batch    = Math.max(8, Math.min(parseInt(q.get('batch')||'128',10),1024));
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  
+    // ---------- endpoint + auto-fallback ----------
+    // Same-origin if unset; override with ?worker=https://host if you want a fixed origin.
+    const paramWorker = (() => { try { return new URL(location.href).searchParams.get('worker') || ''; } catch { return ''; } })();
+    let WORKER = paramWorker || '';                                   // '' means same-origin (/api/…)
+    const FALLBACK = 'https://iperf-me-mvp.iperf.workers.dev';        // workers.dev fallback
 
-  // Same-origin by default; override with ?worker=https://host if you need to
-  let WORKER_BASE = '';
-  try { const u = new URL(location.href); WORKER_BASE = u.searchParams.get('worker') || ''; } catch {}
-  const api = (p, qs) => (WORKER_BASE ? WORKER_BASE.replace(/\/$/,'') : '') + p + (qs?('?'+qs):'');
-
-  // ---------- terminal ----------
-  await new Promise(r => addEventListener('DOMContentLoaded', r, { once:true }));
-  if (!(window.Terminal && window.FitAddon)) { document.getElementById('terminal').textContent='terminal load error'; return; }
-
-  const term = new Terminal({ theme:{ background:'#0b0e12' }, fontSize:12, lineHeight:1.15, scrollback:2000, convertEol:true });
-  const fit  = new FitAddon.FitAddon();
-  term.loadAddon(fit); term.open(document.getElementById('terminal')); fit.fit();
-  addEventListener('resize', () => fit.fit());
-
-  const line = s => { const max=Math.max(1,term.cols-1); for(let i=0;i<s.length;i+=max) term.writeln(s.slice(i,i+max)); };
-  const pad  = (v,w)=> String(v).padStart(w,' ');
-  const toMiB= b => b/(1024*1024);                      // MiB (2^20)
-  const toMb = (b,s)=> (b*8/1e6)/Math.max(s,1e-6);      // Mbit/s (10^6)
-  const sleep= ms=> new Promise(r=>setTimeout(r,ms));
-  const nonce= ()=> Math.random().toString(36).slice(2);
-
-  // Print exactly T intervals anchored to 1.00s, using supplied getter.
-  async function printIntervals(getter, dir, T, startMs) {
-    let lastBytes = getter();
-    let lastMark = startMs;
-    for (let i=0;i<T;i++) {
-      const boundary = startMs + (i+1)*1000;
-      const delay = boundary - performance.now();
-      if (delay > 0) await sleep(delay);
-      const now = performance.now();
-      const total = getter();
-      const dB = total - lastBytes;
-      const dS = (now - lastMark)/1000;
-      line(`[SUM]   ${pad(i,2)}- ${pad(i+1,2)} sec   ${pad(toMiB(dB).toFixed(2),7)}        ${pad(toMb(dB,dS).toFixed(1),7)}       ${dir}`);
-      lastBytes = total; lastMark = now;
-    }
-  }
-
-  // =========================================================
-  // 1) Upload: iperf3 -c edge-auto -t T -P 1  (looped POSTs to /api/u)
-  // =========================================================
-  line(`$ iperf3 -c edge-auto -t ${T} -P 1`);
-  line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
-
-  const upChunk = 1024*1024*(isMobile ? 1 : 2); // smaller blobs keep latency down (1–2 MiB)
-  const upBuf   = new Uint8Array(upChunk);
-  const upBlob  = new Blob([upBuf], { type:'application/octet-stream' });
-
-  let upBytes = 0;
-  const upStart = performance.now();
-  const upUntil = upStart + (T + warm)*1000;  // run during warmup+T (we'll print only T seconds)
-
-  // Run sender loop across multiple requests; each limited by worker to ~100 MiB
-  (async () => {
-    while (performance.now() < upUntil) {
+    export async function fetchWithFallback(url, init = {}, fallbacks = ['https://iperf-me-mvp.iperf.workers.dev']) {
+      // pathAndQuery must start with "/"
+      const tryOnce = async (base) => fetch(`${base}${pathAndQuery}`, init);
       try {
-        const res = await fetch(api('/api/u', 't='+Math.ceil((upUntil - performance.now())/1000)+'&n='+nonce()), {
-          method:'POST', body: upBlob, cache:'no-store',
-          headers:{ 'Content-Type':'application/octet-stream' }
-        });
-        if (res.ok) upBytes += upBlob.size;
-      } catch {
-        // transient network hiccup; continue
-      }
-    }
-  })();
-
-  // Wait warm-up, then print T 1s intervals using bytes since warm-up mark
-  await sleep(warm*1000);
-  const upMarkBytes = upBytes;
-  const upPrintStart = performance.now();
-  await printIntervals(() => (upBytes - upMarkBytes), 'snd', T, upPrintStart);
-
-  // Final summary over printed window T (exclude warm-up)
-  const upTotalPrinted = upBytes - upMarkBytes;
-  line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(upTotalPrinted).toFixed(2),7)}        ${pad(toMb(upTotalPrinted,T).toFixed(1),7)}       snd  (P=1)`);
-  line('');
-
-  // =========================================================
-  // 2) Reverse: iperf3 -c edge-auto -R -t T -P P  (timed /api/d with warm-up skip)
-  // =========================================================
-  line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
-  line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
-
-  let dnBytes = 0;
-  const dnStartAll = performance.now();
-  const dnUntilAll = dnStartAll + (warm + T)*1000;
-
-  // One timed stream (server pull/backpressure), then we replicate P times.
-  async function timedStream(signal) {
-    const url = api('/api/d', `t=${warm+T}&slabMiB=${slabMiB}&batch=${batch}&nonce=${nonce()}`);
-    const r = await fetch(url, { cache:'no-store', headers:{ 'Accept-Encoding':'identity' }, signal });
-    if (!r.ok || !r.body) throw new Error('bad response');
-    const reader = r.body.getReader();
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      dnBytes += value.byteLength;
-      if (performance.now() >= dnUntilAll) break;
-    }
-  }
-
-  async function runReverse(n) {
-    const controllers = [];
-    const tasks = new Set();
-    function startOne() {
-      const ac = new AbortController();
-      controllers.push(ac);
-      const startedAt = performance.now();
-      const p = timedStream(ac.signal).catch((e)=>{
-        // Replace only if it failed immediately (<1s), to keep ramp smooth
-        if (performance.now() - startedAt < 1000 && performance.now() < dnUntilAll) {
-          const ac2 = new AbortController();
-          controllers.push(ac2);
-          const p2 = timedStream(ac2.signal).catch(()=>{}).finally(()=>tasks.delete(p2));
-          tasks.add(p2);
+        const r = await tryOnce(WORKER);
+        if (!r.ok) throw new Error(`status ${r.status}`);
+        return r;
+      } catch (err) {
+        console.warn(`[fetchWithFallback] primary "${WORKER || 'same-origin'}" failed (${err.message || err}). switching to fallback…`);
+        if (WORKER !== FALLBACK) {
+          WORKER = FALLBACK;
+          const r2 = await tryOnce(WORKER);
+          if (!r2.ok) throw new Error(`fallback status ${r2.status}`);
+          return r2;
         }
-      }).finally(()=>tasks.delete(p));
-      tasks.add(p);
-    }
-    for (let i=0;i<n;i++) startOne();
-
-    // Optional early boost at 1.5s if throughput low and desktop
-    if (!isMobile && n < 16) {
-      await sleep(1500);
-      const mbps = toMb(dnBytes, 1.5);
-      if (mbps < 800) {
-        const extra = Math.min(16-n, 4);
-        for (let i=0;i<extra;i++) startOne();
+        throw err;
       }
     }
-
-    // stop at overall deadline
-    const left = dnUntilAll - performance.now();
-    if (left > 0) await sleep(left);
-    controllers.forEach(c=>c.abort('deadline'));
-    await Promise.allSettled([...tasks]);
-  }
-
-  // Run P streams total runtime warm+T, then print the *last T seconds only*
-  await runReverse(P);
-  const dnMarkBytes = dnBytes; // bytes at end of all runtime
-  // To compute printed window bytes, re-run counters from (dnUntilAll - T)
-  // Easiest approach: track “tail bytes” during the last T s by sampling at warm boundary:
-  // We already know total at end; we need total at warm boundary -> approximate by rerunning single fetch T=0.
-  // Simpler: during runtime we didn’t snapshot, so we’ll approximate by running an extra
-  // 0ms step here — but better, we snapshot at warm boundary before: do that now retroactively
-  // using a stored array of samples each second.
-
-})();
-</script>
+  
+    // ---------- terminal ----------
+    await new Promise(r => addEventListener('DOMContentLoaded', r, { once:true }));
+    if (!(window.Terminal && window.FitAddon)) { document.getElementById('terminal').textContent='terminal load error'; return; }
+  
+    const term = new Terminal({ theme:{ background:'#0b0e12' }, fontSize:12, lineHeight:1.15, scrollback:2000, convertEol:true });
+    const fit  = new FitAddon.FitAddon();
+    term.loadAddon(fit); term.open(document.getElementById('terminal')); fit.fit();
+    addEventListener('resize', () => fit.fit());
+  
+    const line = s => { const max=Math.max(1,term.cols-1); for(let i=0;i<s.length;i+=max) term.writeln(s.slice(i,i+max)); };
+    const pad  = (v,w)=> String(v).padStart(w,' ');
+    const toMiB= b => b/(1024*1024);                      // MiB (2^20)
+    const toMb = (b,s)=> (b*8/1e6)/Math.max(s,1e-6);      // Mbit/s (10^6)
+    const sleep= ms=> new Promise(r=>setTimeout(r,ms));
+    const nonce= ()=> Math.random().toString(36).slice(2);
+  
+    // Print exactly T intervals anchored to 1.00s, using supplied getter.
+    async function printIntervals(getter, dir, T, startMs) {
+      let lastBytes = getter();
+      let lastMark = startMs;
+      for (let i=0;i<T;i++) {
+        const boundary = startMs + (i+1)*1000;
+        const delay = boundary - performance.now();
+        if (delay > 0) await sleep(delay);
+        const now = performance.now();
+        const total = getter();
+        const dB = total - lastBytes;
+        const dS = (now - lastMark)/1000;
+        line(`[SUM]   ${pad(i,2)}- ${pad(i+1,2)} sec   ${pad(toMiB(dB).toFixed(2),7)}        ${pad(toMb(dB,dS).toFixed(1),7)}       ${dir}`);
+        lastBytes = total; lastMark = now;
+      }
+    }
+  
+    // =========================================================
+    // 1) Upload: iperf3 -c edge-auto -t T -P 1  (looped POSTs to /api/u)
+    // =========================================================
+    line(`$ iperf3 -c edge-auto -t ${T} -P 1`);
+    line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+  
+    const upChunk = 1024*1024*(isMobile ? 1 : 2); // smaller blobs keep latency down (1–2 MiB)
+    const upBuf   = new Uint8Array(upChunk);
+    const upBlob  = new Blob([upBuf], { type:'application/octet-stream' });
+  
+    let upBytes = 0;
+    const upStart = performance.now();
+    const upUntil = upStart + (T + Math.max(0, Math.min(parseInt(q.get('warm')||'3',10), 10)))*1000;
+  
+    (async () => {
+      while (performance.now() < upUntil) {
+        try {
+          const url = `/api/u?t=${Math.ceil((upUntil - performance.now())/1000)}&n=${nonce()}`;
+          const res = await fetchWithFallback(url, {
+            method:'POST',
+            body: upBlob,
+            cache:'no-store',
+            headers:{ 'Content-Type':'application/octet-stream' }
+          });
+          if (res.ok) upBytes += upBlob.size;
+        } catch { /* ignore transient errors */ }
+      }
+    })();
+  
+    // Wait warm-up, then print T 1s intervals using bytes since warm-up mark
+    const warm = Math.max(0, Math.min(parseInt(q.get('warm')||'3',10), 10));
+    await sleep(warm*1000);
+    const upMarkBytes = upBytes;
+    const upPrintStart = performance.now();
+    await printIntervals(() => (upBytes - upMarkBytes), 'snd', T, upPrintStart);
+  
+    const upTotalPrinted = upBytes - upMarkBytes;
+    line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(upTotalPrinted).toFixed(2),7)}        ${pad(toMb(upTotalPrinted,T).toFixed(1),7)}       snd  (P=1)`);
+    line('');
+  
+    // =========================================================
+    // 2) Reverse: iperf3 -c edge-auto -R -t T -P P  (timed /api/d with warm-up skip)
+    // =========================================================
+    line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
+    line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+  
+    let dnBytes = 0;
+    const dnStartAll = performance.now();
+    const dnUntilAll = dnStartAll + (warm + T)*1000;
+  
+    async function timedStream(signal) {
+      const url = `/api/d?t=${warm+T}&slabMiB=${slabMiB}&batch=${batch}&nonce=${nonce()}`;
+      const r = await fetchWithFallback(url, { cache:'no-store', headers:{ 'Accept-Encoding':'identity' }, signal });
+      if (!r.ok || !r.body) throw new Error('bad response');
+      const reader = r.body.getReader();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        dnBytes += value.byteLength;
+        if (performance.now() >= dnUntilAll) break;
+      }
+    }
+  
+    async function runReverse(n) {
+      const controllers = [];
+      const tasks = new Set();
+      function startOne() {
+        const ac = new AbortController();
+        controllers.push(ac);
+        const startedAt = performance.now();
+        const p = timedStream(ac.signal).catch(() => {
+          if (performance.now() - startedAt < 1000 && performance.now() < dnUntilAll) {
+            const ac2 = new AbortController();
+            controllers.push(ac2);
+            const p2 = timedStream(ac2.signal).catch(()=>{}).finally(()=>tasks.delete(p2));
+            tasks.add(p2);
+          }
+        }).finally(()=>tasks.delete(p));
+        tasks.add(p);
+      }
+      for (let i=0;i<n;i++) startOne();
+  
+      if (!isMobile && n < 16) {
+        await sleep(1500);
+        const mbps = toMb(dnBytes, 1.5);
+        if (mbps < 800) {
+          const extra = Math.min(16-n, 4);
+          for (let i=0;i<extra;i++) startOne();
+        }
+      }
+  
+      const left = dnUntilAll - performance.now();
+      if (left > 0) await sleep(left);
+      controllers.forEach(c=>c.abort('deadline'));
+      await Promise.allSettled([...tasks]);
+    }
+  
+    await runReverse(P);
+  
+    // Print the last T seconds only (we anchored intervals to now)
+    const dnMarkStart = performance.now();
+    const before = dnBytes;
+    await printIntervals(() => (dnBytes - before), 'rcv', T, dnMarkStart);
+  
+    const dnPrinted = dnBytes - before;
+    line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnPrinted).toFixed(2),7)}        ${pad(toMb(dnPrinted,T).toFixed(1),7)}       rcv  (P=${P})`);
+  })();
+  </script>
+  
 </body>
 </html>
