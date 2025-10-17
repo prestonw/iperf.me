@@ -3,16 +3,25 @@ main = "src/worker.js"
 compatibility_date = "2024-10-01"
 workers_dev = true
 
-# Attach the Worker to your zone and custom subdomain
-routes = [
-  { pattern = "edge.iperf.me/*", zone_name = "iperf.me" }
-]
+# Run globally on the edge (default today, but explicit doesn't hurt)
+[placement]
+mode = "smart"
 
-# wrangler.toml (wrangler v3.88.0^)
+# Attach to zone routes (requires API token with Zone → Workers Routes → Edit)
+# 1) Same-origin API (preferred so CORS is a non-issue)
+[[routes]]
+pattern = "iperf.me/api/*"
+zone_name = "iperf.me"
+
+# 2) Legacy/alt entrypoint (optional): keep the edge subdomain working
+[[routes]]
+pattern = "edge.iperf.me/*"
+zone_name = "iperf.me"
+
 [observability]
 enabled = false
 
 [observability.logs]
 enabled = true
-head_sampling_rate = 1
 invocation_logs = true
+head_sampling_rate = 1
