@@ -1,209 +1,222 @@
 <!doctype html>
 <html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>iperf.me — MVP</title>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>iperf.me — MVP</title>
 
-    <link rel="stylesheet" href="vendor/xterm/xterm.min.css" />
-    <style>
-      :root{--bg:#0b0e12;--fg:#e6edf3;--mut:#a5b4c4;--line:#1d2633;--pill:#142033}
-      html,body{height:100%}
-      body{
-        margin:0;background:var(--bg);color:var(--fg);
-        font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
-        font-size:12px;line-height:1.15;
-        -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale
-      }
-      header{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
-      .badge{background:var(--pill);color:var(--mut);padding:3px 6px;border-radius:6px;font-size:11px;white-space:nowrap}
-      .sep{opacity:.5}
-      #terminal{height:calc(100vh - 46px)}
-    </style>
-  </head>
+<link rel="stylesheet" href="vendor/xterm/xterm.min.css" />
+<style>
+  :root{--bg:#0b0e12;--fg:#e6edf3;--mut:#a5b4c4;--line:#1d2633;--pill:#142033}
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+    font-size:12px;line-height:1.15;
+    -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale
+  }
+  header{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+  .badge{background:var(--pill);color:var(--mut);padding:3px 6px;border-radius:6px;font-size:11px;white-space:nowrap}
+  .sep{opacity:.5}
+  #terminal{height:calc(100vh - 46px)}
+</style>
 
-  <body>
-    <header>
-      <strong>iperf.me</strong><span class="sep">|</span>
-      <span class="badge">edge-friendly</span>
-      <span class="badge">iPerf-style</span>
-      <span style="margin-left:auto;font-size:11px;color:#8fa5b7">Inspired by iPerf3 (BSD, ESnet). Not affiliated.</span>
-    </header>
-    <div id="terminal"></div>
+<body>
+<header>
+  <strong>iperf.me</strong><span class="sep">|</span>
+  <span class="badge">edge-friendly</span>
+  <span class="badge">iPerf-style</span>
+  <span style="margin-left:auto;font-size:11px;color:#8fa5b7">Inspired by iPerf3 (BSD, ESnet). Not affiliated.</span>
+</header>
+<div id="terminal"></div>
 
-    <script src="vendor/xterm/xterm.min.js" defer></script>
-    <script src="vendor/xterm/xterm-addon-fit.js" defer></script>
+<script defer src="vendor/xterm/xterm.min.js"></script>
+<script defer src="vendor/xterm/xterm-addon-fit.js"></script>
 
-    <!-- Main app as an ES module -->
-    <script type="module">
-      import { fetchWithFallback } from './client/js/fallback.js';
-
-      // Wait for DOM + xterm to be available
-      await new Promise(r => addEventListener('DOMContentLoaded', r, { once:true }));
-
-      if (!(window.Terminal && window.FitAddon)) {
-        document.getElementById('terminal').textContent = 'terminal load error';
-        throw new Error('xterm not loaded');
-      }
-
-      // ---------- params (declare ONCE) ----------
-      const q         = new URLSearchParams(location.search);
-      const T         = Math.max(1, Math.min(parseInt(q.get('t')    || '10', 10), 60));   // printed seconds
-      const WARM      = Math.max(0, Math.min(parseInt(q.get('warm') || '3',  10), 10));   // warm-up seconds ignored
-      const P         = Math.max(1, Math.min(parseInt(q.get('p')    || '4',  10), 16));   // reverse parallel
-      const slabMiB   = Math.max(1, Math.min(parseInt(q.get('chunk')|| '32', 10), 64));   // server slab size
-      const batch     = Math.max(8, Math.min(parseInt(q.get('batch')|| '128',10),1024));  // server batch hint
-      const isMobile  = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-
-      // Endpoints: same-origin primary, workers.dev fallback (and optional explicit ?worker=… override)
-      const paramWorker = (() => { try { return new URL(location.href).searchParams.get('worker') || ''; } catch { return ''; } })();
-      const FALLBACK    = 'https://iperf-me-mvp.iperf.workers.dev';
-      const toTargets   = (pathAndQuery) => {
-        const first = paramWorker ? `${paramWorker.replace(/\/$/,'')}${pathAndQuery}` : pathAndQuery; // same-origin if no ?worker
-        return [ first, `${FALLBACK}${pathAndQuery}` ];
-      };
-
-      // ---------- terminal ----------
-      const term = new Terminal({ theme:{ background:'#0b0e12' }, fontSize:12, lineHeight:1.15, scrollback:2000, convertEol:true });
-      const fit  = new FitAddon.FitAddon();
-      term.loadAddon(fit); term.open(document.getElementById('terminal')); fit.fit();
-      addEventListener('resize', () => fit.fit());
-
-      const line = s => { const max=Math.max(1,term.cols-1); for(let i=0;i<s.length;i+=max) term.writeln(s.slice(i,i+max)); };
-      const pad  = (v,w)=> String(v).padStart(w,' ');
-      const toMiB= b => b/(1024*1024);                      // MiB (2^20)
-      const toMb = (b,s)=> (b*8/1e6)/Math.max(s,1e-6);      // Mbit/s (10^6)
-      const sleep= ms=> new Promise(r=>setTimeout(r,ms));
-      const nonce= ()=> Math.random().toString(36).slice(2);
-
-      // Print exactly N intervals anchored to 1.00s, using supplied getter.
-      async function printIntervals(getter, dir, seconds, startMs) {
-        let lastBytes = getter();
-        let lastMark  = startMs;
-        for (let i=0; i<seconds; i++) {
-          const boundary = startMs + (i+1)*1000;
-          const delay    = boundary - performance.now();
-          if (delay > 0) await sleep(delay);
-          const now   = performance.now();
-          const total = getter();
-          const dB    = total - lastBytes;
-          const dS    = (now - lastMark)/1000;
-          line(`[SUM]   ${pad(i,2)}- ${pad(i+1,2)} sec   ${pad(toMiB(dB).toFixed(2),7)}        ${pad(toMb(dB,dS).toFixed(1),7)}       ${dir}`);
-          lastBytes = total; lastMark = now;
+<script type="module">
+(async () => {
+  // ------- helpers -------
+  function fetchWithFallback(targetsOrUrl, init = {}, fallbacks) {
+    let targets = [];
+    if (Array.isArray(targetsOrUrl)) {
+      targets = targetsOrUrl;
+    } else {
+      targets = [targetsOrUrl];
+      if (Array.isArray(fallbacks)) targets.push(...fallbacks);
+      else if (fallbacks) targets.push(fallbacks);
+    }
+    let lastErr = new Error('All fetch attempts failed');
+    return (async () => {
+      for (const t of targets) {
+        try {
+          const res = await fetch(t, init);
+          if (res.ok) return res;
+          lastErr = new Error(`status ${res.status}`);
+        } catch (e) {
+          lastErr = e instanceof Error ? e : new Error(String(e));
         }
       }
+      throw lastErr;
+    })();
+  }
+  const pad   = (v,w)=> String(v).padStart(w,' ');
+  const toMiB = b => b/(1024*1024);
+  const toMb  = (b,s)=> (b*8/1e6)/Math.max(s,1e-6);
+  const sleep = ms=> new Promise(r=>setTimeout(r,ms));
+  const nonce = ()=> Math.random().toString(36).slice(2);
 
-      // =========================================================
-      // 1) Upload: iperf3 -c edge-auto -t T -P 1  (looped POSTs to /api/u)
-      // =========================================================
-      line(`$ iperf3 -c edge-auto -t ${T} -P 1`);
-      line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+  // ------- params -------
+  await new Promise(r => addEventListener('DOMContentLoaded', r, { once:true }));
+  const q        = new URLSearchParams(location.search);
+  const T        = Math.max(1, Math.min(parseInt(q.get('t')||'10',10), 60));
+  const warm     = Math.max(0, Math.min(parseInt(q.get('warm')||'3',10), 10));
+  const P        = Math.max(1, Math.min(parseInt(q.get('p')||'4',10), 16));
+  const slabMiB  = Math.max(1, Math.min(parseInt(q.get('chunk')||'32',10), 64));
+  const batch    = Math.max(8, Math.min(parseInt(q.get('batch')||'128',10),1024));
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
-      const upChunk = 1024*1024*(isMobile ? 1 : 2); // 1–2 MiB
-      const upBuf   = new Uint8Array(upChunk);
-      const upBlob  = new Blob([upBuf], { type:'application/octet-stream' });
+  // Base + fallback targets (same-origin first)
+  const userWorker = (() => { try { return new URL(location.href).searchParams.get('worker') || ''; } catch { return ''; } })();
+  const BASE = userWorker || ''; // '' means same-origin
+  const FALLBACK = 'https://iperf-me-mvp.iperf.workers.dev';
 
-      let upBytes   = 0;
-      const upStart = performance.now();
-      const upUntil = upStart + (T + WARM)*1000;
+  // ------- terminal -------
+  if (!(window.Terminal && window.FitAddon)) {
+    document.getElementById('terminal').textContent='terminal load error';
+    return;
+  }
+  const term = new Terminal({ theme:{ background:'#0b0e12' }, fontSize:12, lineHeight:1.15, scrollback:2000, convertEol:true });
+  const fit  = new FitAddon.FitAddon();
+  term.loadAddon(fit); term.open(document.getElementById('terminal')); fit.fit();
+  addEventListener('resize', () => fit.fit());
+  const line = s => { const max=Math.max(1,term.cols-1); for(let i=0;i<s.length;i+=max) term.writeln(s.slice(i,i+max)); };
 
-      (async () => {
-        while (performance.now() < upUntil) {
-          try {
-            const url = `/api/u?t=${Math.ceil((upUntil - performance.now())/1000)}&n=${nonce()}`;
-            const res = await fetchWithFallback(toTargets(url), {
-              method:'POST',
-              body: upBlob,
-              cache:'no-store',
-              headers:{ 'Content-Type':'application/octet-stream' }
-            });
-            if (res.ok) upBytes += upBlob.size;
-          } catch { /* ignore transient errors */ }
+  async function printIntervals(getter, dir, seconds, startMs) {
+    let lastBytes = getter();
+    let lastMark  = startMs;
+    for (let i=0;i<seconds;i++) {
+      const boundary = startMs + (i+1)*1000;
+      const wait = boundary - performance.now();
+      if (wait > 0) await sleep(wait);
+      const now = performance.now();
+      const total = getter();
+      const dB = total - lastBytes;
+      const dS = (now - lastMark)/1000;
+      line(`[SUM]   ${pad(i,2)}- ${pad(i+1,2)} sec   ${pad(toMiB(dB).toFixed(2),7)}        ${pad(toMb(dB,dS).toFixed(1),7)}       ${dir}`);
+      lastBytes = total; lastMark = now;
+    }
+  }
+
+  // =========================================================
+  // Upload (looped POSTs to /api/u)
+  // =========================================================
+  line(`$ iperf3 -c edge-auto -t ${T} -P 1`);
+  line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+
+  const upChunk = 1024*1024*(isMobile ? 1 : 2);
+  const upBuf   = new Uint8Array(upChunk);
+  const upBlob  = new Blob([upBuf], { type:'application/octet-stream' });
+
+  let upBytes = 0;
+  const upStart = performance.now();
+  const upUntil = upStart + (warm + T)*1000;
+
+  (async () => {
+    while (performance.now() < upUntil) {
+      const targets = [
+        `${BASE}/api/u?t=${Math.ceil((upUntil - performance.now())/1000)}&n=${nonce()}`,
+        `${FALLBACK}/api/u?t=${Math.ceil((upUntil - performance.now())/1000)}&n=${nonce()}`
+      ];
+      try {
+        const res = await fetchWithFallback(targets, {
+          method:'POST', body: upBlob, cache:'no-store',
+          headers:{ 'Content-Type':'application/octet-stream' }
+        });
+        if (res.ok) upBytes += upBlob.size;
+      } catch { /* ignore */ }
+    }
+  })();
+
+  await sleep(warm*1000);
+  const upMarkBytes   = upBytes;
+  const upPrintStart  = performance.now();
+  await printIntervals(()=> (upBytes - upMarkBytes), 'snd', T, upPrintStart);
+  const upTotalPrinted = upBytes - upMarkBytes;
+  line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(upTotalPrinted).toFixed(2),7)}        ${pad(toMb(upTotalPrinted,T).toFixed(1),7)}       snd  (P=1)`);
+  line('');
+
+  // =========================================================
+  // Reverse download (timed /api/d with warm-up skip)
+  // =========================================================
+  line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
+  line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
+
+  let dnBytes = 0;
+  const dnStartAll = performance.now();
+  const dnUntilAll = dnStartAll + (warm + T)*1000;
+
+  async function oneStream(signal) {
+    const targets = [
+      `${BASE}/api/d?t=${warm+T}&slabMiB=${slabMiB}&batch=${batch}&n=${nonce()}`,
+      `${FALLBACK}/api/d?t=${warm+T}&slabMiB=${slabMiB}&batch=${batch}&n=${nonce()}`
+    ];
+    const res = await fetchWithFallback(targets, {
+      cache:'no-store',
+      headers:{ 'Accept-Encoding':'identity' },
+      signal
+    });
+    if (!res.ok || !res.body) throw new Error('bad response');
+    const reader = res.body.getReader();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      dnBytes += value.byteLength;
+      if (performance.now() >= dnUntilAll) break;
+    }
+  }
+
+  async function runReverse(n) {
+    const controllers = [];
+    const tasks = new Set();
+    function startOne() {
+      const ac = new AbortController();
+      controllers.push(ac);
+      const startedAt = performance.now();
+      const p = oneStream(ac.signal).catch(() => {
+        if (performance.now() - startedAt < 1000 && performance.now() < dnUntilAll) {
+          const ac2 = new AbortController();
+          controllers.push(ac2);
+          const p2 = oneStream(ac2.signal).catch(()=>{}).finally(()=>tasks.delete(p2));
+          tasks.add(p2);
         }
-      })();
+      }).finally(()=>tasks.delete(p));
+      tasks.add(p);
+    }
+    for (let i=0;i<n;i++) startOne();
 
-      // Wait warm-up, then print T 1s intervals using bytes since warm-up mark
-      await sleep(WARM*1000);
-      const upMarkBytes  = upBytes;
-      const upPrintStart = performance.now();
-      await printIntervals(() => (upBytes - upMarkBytes), 'snd', T, upPrintStart);
-
-      const upTotalPrinted = upBytes - upMarkBytes;
-      line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(upTotalPrinted).toFixed(2),7)}        ${pad(toMb(upTotalPrinted,T).toFixed(1),7)}       snd  (P=1)`);
-      line('');
-
-      // =========================================================
-      // 2) Reverse: iperf3 -c edge-auto -R -t T -P P  (timed /api/d with warm-up skip)
-      // =========================================================
-      line(`$ iperf3 -c edge-auto -R -t ${T} -P ${P}`);
-      line('[ ID]   Interval         Transfer (MiB)   Bitrate (Mbit/s)   Direction');
-
-      let dnBytes          = 0;
-      const dnStartAll     = performance.now();
-      const dnUntilAll     = dnStartAll + (WARM + T)*1000;
-
-      async function timedStream(signal) {
-        const url = `/api/d?t=${WARM+T}&slabMiB=${slabMiB}&batch=${batch}&nonce=${nonce()}`;
-        const res = await fetchWithFallback(toTargets(url), { cache:'no-store', headers:{ 'Accept-Encoding':'identity' }, signal });
-        if (!res.ok || !res.body) throw new Error('bad response');
-        const reader = res.body.getReader();
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          dnBytes += value.byteLength;
-          if (performance.now() >= dnUntilAll) break;
-        }
+    if (!isMobile && n < 16) {
+      await sleep(1500);
+      const mbps = toMb(dnBytes, 1.5);
+      if (mbps < 800) {
+        const extra = Math.min(16-n, 4);
+        for (let i=0;i<extra;i++) startOne();
       }
+    }
 
-      async function runReverse(n) {
-        const controllers = [];
-        const tasks = new Set();
+    const left = dnUntilAll - performance.now();
+    if (left > 0) await sleep(left);
+    controllers.forEach(c=>c.abort('deadline'));
+    await Promise.allSettled([...tasks]);
+  }
 
-        function startOne() {
-          const ac = new AbortController();
-          controllers.push(ac);
-          const startedAt = performance.now();
-          const p = timedStream(ac.signal).catch(() => {
-            // replace only if it died very early (<1s)
-            if (performance.now() - startedAt < 1000 && performance.now() < dnUntilAll) {
-              const ac2 = new AbortController();
-              controllers.push(ac2);
-              const p2 = timedStream(ac2.signal).catch(()=>{}).finally(()=>tasks.delete(p2));
-              tasks.add(p2);
-            }
-          }).finally(()=>tasks.delete(p));
-          tasks.add(p);
-        }
+  await runReverse(P);
 
-        for (let i=0;i<n;i++) startOne();
-
-        // modest auto-boost on desktop if throughput is low at t≈1.5s
-        if (!isMobile && n < 16) {
-          const t0 = performance.now();
-          const wait = Math.max(0, (t0 + 1500) - performance.now());
-          if (wait > 0) await sleep(wait);
-          const mbps = toMb(dnBytes, Math.max(1, (performance.now() - t0)/1000));
-          if (mbps < 800) {
-            const extra = Math.min(16-n, 4);
-            for (let i=0;i<extra;i++) startOne();
-          }
-        }
-
-        const left = dnUntilAll - performance.now();
-        if (left > 0) await sleep(left);
-        controllers.forEach(c=>c.abort('deadline'));
-        await Promise.allSettled([...tasks]);
-      }
-
-      await runReverse(P);
-
-      // Print only the last T seconds (anchored to now)
-      const dnBefore     = dnBytes;
-      const dnStartPrint = performance.now();
-      await printIntervals(() => (dnBytes - dnBefore), 'rcv', T, dnStartPrint);
-
-      const dnPrinted = dnBytes - dnBefore;
-      line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnPrinted).toFixed(2),7)}        ${pad(toMb(dnPrinted,T).toFixed(1),7)}       rcv  (P=${P})`);
-    </script>
-  </body>
+  // Print last T seconds: sample after warm phase
+  const dnBefore = dnBytes;
+  const dnPrintStart = performance.now();
+  await printIntervals(()=> (dnBytes - dnBefore), 'rcv', T, dnPrintStart);
+  const dnPrinted = dnBytes - dnBefore;
+  line(`[SUM]  0.00-${T.toFixed(2)} sec   ${pad(toMiB(dnPrinted).toFixed(2),7)}        ${pad(toMb(dnPrinted,T).toFixed(1),7)}       rcv  (P=${P})`);
+})();
+</script>
+</body>
 </html>
