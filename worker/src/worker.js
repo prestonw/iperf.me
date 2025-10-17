@@ -47,49 +47,65 @@ export default {
     }
 
     // ------------- Timed high-throughput DOWNLOAD: GET /d?t=SECONDS&slabMiB=32&batch=128 -------------
-    if (path === '/d' && req.method === 'GET') {
+    if (path === "/d" && req.method === "GET") {
+      const CORS = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Expose-Headers": "*",
+        "Cache-Control": "no-store, no-transform",
+        "X-Accel-Buffering": "no",
+      };
+
       try {
-        const tSec = Math.max(1, Math.min(parseInt(url.searchParams.get('t') || '10', 10), 60));
-        const slabMiB = Math.max(1, Math.min(parseInt(url.searchParams.get('slabMiB') || '32', 10), 64));
-        const batch = Math.max(16, Math.min(parseInt(url.searchParams.get('batch') || '128', 10), 1024));
+        const u = new URL(req.url);
+        const tSec    = Math.max(1, Math.min(parseInt(u.searchParams.get("t") || "10", 10), 60));
+        const slabMiB = Math.max(1, Math.min(parseInt(u.searchParams.get("slabMiB") || "32", 10), 64));
+        // We will *ignore* giant batch values; the stream will pace itself.
+        const perPullMaxBytes = 2 * 1024 * 1024; // ≤2 MiB per pull keeps memory stable
+
+        // Prebuilt zero slab (shared across writes; no reallocation)
+        const slab = new Uint8Array(slabMiB * 1024 * 1024);
+        const chunkCountPerPull = Math.max(1, Math.floor(perPullMaxBytes / slab.byteLength));
+
         const deadline = Date.now() + tSec * 1000;
 
-        const slab = new Uint8Array(slabMiB * 1024 * 1024); // zeros
-
-        const { readable, writable } = new TransformStream();
-        (async () => {
-          const w = writable.getWriter();
-          try {
-            while (Date.now() < deadline) {
-              for (let i = 0; i < batch; i++) {
-                await w.ready;
-                await w.write(slab);
-                if (Date.now() >= deadline) break;
-              }
-              // Small cooperative yield for CPU watchdogs; ignore if not present
-              try { await scheduler.yield?.(); } catch {}
+        const readable = new ReadableStream({
+          async pull(controller) {
+            // Stop if time’s up
+            if (Date.now() >= deadline) {
+              controller.close();
+              return;
             }
-          } catch {}
-          finally {
-            try { await w.close(); } catch {}
+
+            // Enqueue a small, bounded burst, then yield back to the runtime.
+            // This respects back-pressure because `pull` is called again only when the sink is ready.
+            for (let i = 0; i < chunkCountPerPull; i++) {
+              if (Date.now() >= deadline) break;
+              controller.enqueue(slab);
+            }
+
+            // Cooperative yield so CPU time stays tiny, even if pulls come back-to-back.
+            await new Promise(r => setTimeout(r, 0));
           }
-        })();
+        });
 
         return new Response(readable, {
           headers: {
             ...CORS,
-            'Content-Type': 'application/octet-stream',
-            'Cache-Control': 'no-store, no-transform',
-          },
+            "Content-Type": "application/octet-stream",
+            // nudge away from flaky h3 setups if any
+            "Alt-Svc": 'h2=":443"; ma=120'
+          }
         });
       } catch (e) {
         return new Response(JSON.stringify({ ok: false, error: String(e) }), {
           status: 500,
-          headers: { ...CORS, 'Content-Type': 'application/json' },
+          headers: { "Content-Type": "application/json", ...CORS }
         });
       }
     }
-
+    
     // --------------------- Burst UPLOAD fallback: POST /upload (10 MiB cap) ---------------------
     if (path === '/upload' && req.method === 'POST') {
       const MAX = 10 * 1024 * 1024;

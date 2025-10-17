@@ -15,14 +15,14 @@ function createMF() {
 
 test("GET /api/d streams bytes with CORS and octet-stream", async () => {
   const mf = createMF();
-  const url = "http://localhost/api/d?t=2&slabMiB=2&batch=64&nonce=test";
+  const url = "http://localhost/api/d?t=2&slabMiB=2&nonce=test";
   const res = await mf.dispatchFetch(url);
 
   expect(res.status).toBe(200);
   expect(res.headers.get("content-type")).toMatch(/application\/octet-stream/);
   expect(res.headers.get("access-control-allow-origin")).toBe("*");
 
-  // Read a chunk quickly; we should get non-zero bytes within ~2s
+  // Read a chunk quickly; we expect to receive data
   const reader = res.body.getReader();
   let total = 0;
   const t0 = Date.now();
