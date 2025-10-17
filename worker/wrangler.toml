@@ -1,6 +1,6 @@
 name = "iperf-me-mvp"
 main = "src/worker.js"
-compatibility_date = "2024-10-01"
+compatibility_date = "2025-10-17"
 workers_dev = true
 
 # Run globally on the edge (default today, but explicit doesn't hurt)
