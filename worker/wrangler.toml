@@ -1,19 +1,22 @@
+# worker/wrangler.toml
 name = "iperf-me-mvp"
-main = "src/worker.js"
-compatibility_date = "2025-10-17"
+main = "src/worker.js"              # this matches your repo: worker/src/worker.js
+compatibility_date = "2024-10-01"   # must NOT be in the future
 workers_dev = true
 
-# Run globally on the edge (default today, but explicit doesn't hurt)
+# optional, but fine to keep
 [placement]
 mode = "smart"
 
-# Attach to zone routes (requires API token with Zone → Workers Routes → Edit)
-# 1) Same-origin API (preferred so CORS is a non-issue)
+# Route ONLY API paths to the worker so Pages/HTML never swallows them
+# (this fixes the “/api/d returns HTML / 503” issue when Pages is present)
 [[routes]]
 pattern = "iperf.me/api/*"
 zone_name = "iperf.me"
 
-# 2) Legacy/alt entrypoint (optional): keep the edge subdomain working
+# Optional extra entrypoint for testing/bypassing Pages
+# If you’ll only ever use the Worker for API calls, you can scope it to /api/* too:
+# pattern = "edge.iperf.me/api/*"
 [[routes]]
 pattern = "edge.iperf.me/*"
 zone_name = "iperf.me"
